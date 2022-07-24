@@ -669,7 +669,7 @@ static void multi_role_init(void)
     GPIO_write(LED_0, 0);
     GPIO_write(LED_1, 0);
 
-    multi_role_doAdvertise(0);
+//    multi_role_doAdvertise(0);
 }
 
 /*********************************************************************
@@ -949,7 +949,7 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
 
             BLE_LOG_INT_INT(0, BLE_LOG_MODULE_APP, "APP : ---- start advert %d,%d\n", 0, 0);
             //Setup and start advertising
-            multi_role_advertInit();
+//            multi_role_advertInit();
 
         }
 
