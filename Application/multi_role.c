@@ -74,6 +74,7 @@
 #include <ti/drivers/utils/List.h>
 #include <ti/drivers/GPIO.h>
 #include <ti/drivers/SPI.h>
+#include <MC3635.h>
 
 #include <icall.h>
 #include "util.h"
@@ -525,7 +526,7 @@ void multi_role_createTask(void)
 static void multi_role_init(void)
 {
     GPIO_init();
-//    SPI_init();
+    SPI_init();
     GPIO_write(LED_0, 1);
 
     BLE_LOG_INT_TIME(0, BLE_LOG_MODULE_APP, "APP : ---- init ", MR_TASK_PRIORITY);
