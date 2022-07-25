@@ -16,6 +16,7 @@
 //#include <stdint.h>
 //#include <stddef.h>
 #include <string.h>
+#include <stdio.h>
 
 #ifdef FREERTOS
 #include <FreeRTOS.h>
@@ -90,6 +91,14 @@
 #define JUXTA_EVT_ADV_TIMEOUT      16
 #define JUXTA_EVT_SCAN_TIMEOUT     17
 #define JUXTA_EVT_RESET            18
+#define JUXTA_EVT_MAGNET_PERIODIC  19
+
+// Non-events
+#define MR_PERIODIC_EVT_PERIOD          5000
+#define JUXTA_ADV_TIMEOUT_PERIOD        2000
+#define JUXTA_SCAN_TIMEOUT_PERIOD       1000 // less than DEFAULT_SCAN_DURATION
+#define JUXTA_SCAN_N_TIMES              5
+#define JUXTA_MAGNET_PERIOD             1000
 
 // Internal Events for RTOS application
 #define MR_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
@@ -135,12 +144,6 @@ typedef enum
 
 // address string length is an ascii character for each digit +
 #define MR_ADDR_STR_SIZE     15
-
-// How often to perform periodic event (in msec)
-#define MR_PERIODIC_EVT_PERIOD          5000
-#define JUXTA_ADV_TIMEOUT_PERIOD        2000
-#define JUXTA_SCAN_TIMEOUT_PERIOD       1000 // less than DEFAULT_SCAN_DURATION
-#define JUXTA_SCAN_N_TIMES              5
 
 #define CONNINDEX_INVALID  0xFF
 
@@ -324,9 +327,11 @@ static uint8_t mrInitPhy = INIT_PHY_1M;
 SPI_Handle spiHandle;
 static Clock_Struct clkJuxtaAdvTimeout;
 static Clock_Struct clkJuxtaScanTimeout;
+static Clock_Struct clkJuxtaMagnet;
 
 mrClockEventData_t argJuxtaAdvTimeout = { .event = JUXTA_EVT_ADV_TIMEOUT };
 mrClockEventData_t argJuxtaScanTimeout = { .event = JUXTA_EVT_SCAN_TIMEOUT };
+mrClockEventData_t argJuxtaMagnet = { .event = JUXTA_EVT_MAGNET_PERIODIC };
 
 static bool sniffAdv = true;
 static bool doDebug = true;
@@ -356,7 +361,7 @@ static void multi_role_charValueChangeCB(uint8_t paramID);
 static status_t multi_role_enqueueMsg(uint8_t event, void *pData);
 static void multi_role_handleKeys(uint8_t keys);
 static uint16_t multi_role_getConnIndex(uint16_t connHandle);
-static void multi_role_keyChangeHandler(uint8_t keys);
+//static void multi_role_keyChangeHandler(uint8_t keys);
 static uint8_t multi_role_addConnInfo(uint16_t connHandle, uint8_t *pAddr,
                                       uint8_t role);
 static void multi_role_performPeriodicTask(void);
@@ -369,8 +374,8 @@ static bool multi_role_findSvcUuid(uint16_t uuid, uint8_t *pData,
                                    uint16_t dataLen);
 #endif // DEFAULT_DEV_DISC_BY_SVC_UUID
 static uint8_t multi_role_removeConnInfo(uint16_t connHandle);
-static void multi_role_menuSwitchCb(tbmMenuObj_t *pMenuObjCurr,
-                                    tbmMenuObj_t *pMenuObjNext);
+//static void multi_role_menuSwitchCb(tbmMenuObj_t *pMenuObjCurr,
+//                                    tbmMenuObj_t *pMenuObjNext);
 static void multi_role_startSvcDiscovery(void);
 #ifndef Display_DISABLE_ALL
 static char* multi_role_getConnAddrStr(uint16_t connHandle);
@@ -407,6 +412,16 @@ static gapBondCBs_t multi_role_BondMgrCBs = { multi_role_passcodeCB, // Passcode
  * PUBLIC FUNCTIONS
  */
 
+static void logScan(void) // called after MR_EVT_ADV_REPORT -> multi_role_addScanInfo()
+{
+    // see: scanList, numScanRes
+    if (numScanRes > 0) {
+        GPIO_write(LED_0, 1);
+        usleep(20000);
+        GPIO_write(LED_0, 0);
+    }
+}
+
 static void resetSniff(void)
 {
     MC36XX_interrupt_event_t evt_mc36xx = { 0 };
@@ -414,6 +429,18 @@ static void resetSniff(void)
     {
         MC3635_INTHandler(spiHandle, &evt_mc36xx);
         MC3635_sensorSniff(spiHandle);
+    }
+    GPIO_enableInt(AXY_INT);
+    GPIO_write(LED_0, 0);
+    GPIO_write(LED_1, 0);
+}
+
+void magnetInterrupt(void) // not static, referenced in sysConfig
+{
+    GPIO_disableInt(MAGNET);
+    if (!Util_isActive(&clkJuxtaMagnet))
+    {
+        Util_startClock(&clkJuxtaMagnet); // kick-off
     }
 }
 
@@ -426,9 +453,9 @@ static void blink(uint8_t runOnce)
 {
     while (1)
     {
-        GPIO_write(LED_1, 1);
+        GPIO_write(LED_0, 1);
         usleep(50000);
-        GPIO_write(LED_1, 0);
+        GPIO_write(LED_0, 0);
         usleep(50000);
         if (runOnce == 1)
         {
@@ -490,6 +517,13 @@ void multi_role_createTask(void)
  */
 static void multi_role_init(void)
 {
+    // swap BLE address to include MAC address (unique for each device)
+    uint64_t bleAddress = *((uint64_t*) (FCFG1_BASE + FCFG1_O_MAC_BLE_0))
+            & 0xFFFFFFFFFFFF;
+    char newAddress[GAP_DEVICE_NAME_LEN] = ""; // +1 for null
+    sprintf(newAddress, "JX_%llu", bleAddress); // use <4 chars as prepend
+    memcpy(attDeviceName, newAddress, GAP_DEVICE_NAME_LEN);
+
     GPIO_init();
     SPI_init();
     GPIO_write(LED_0, 1);
@@ -545,6 +579,11 @@ static void multi_role_init(void)
     Util_constructClock(&clkJuxtaScanTimeout, multi_role_clockHandler,
     JUXTA_SCAN_TIMEOUT_PERIOD,
                         0, false, (UArg) &argJuxtaScanTimeout);
+
+    // could also be periodic and use stopClock(), see JUXTA_EVT_MAGNET_PERIODIC
+    Util_constructClock(&clkJuxtaMagnet, multi_role_clockHandler,
+    JUXTA_MAGNET_PERIOD,
+                        0, false, (UArg) &argJuxtaMagnet);
 
     // MGRM Init key debouncer
 //    Board_initKeys(multi_role_keyChangeHandler);
@@ -644,6 +683,7 @@ static void multi_role_init(void)
     GPIO_write(LED_0, 0);
     GPIO_write(LED_1, 0);
     GPIO_enableInt(AXY_INT);
+    GPIO_enableInt(MAGNET);
 }
 
 /*********************************************************************
@@ -655,11 +695,7 @@ static void multi_role_init(void)
  *
  * @return  None.
  */
-#ifdef FREERTOS
-static void multi_role_taskFxn(void* a0)
-#else
 static void multi_role_taskFxn(UArg a0, UArg a1)
-#endif
 {
     // Initialize application
     multi_role_init();
@@ -672,13 +708,8 @@ static void multi_role_taskFxn(UArg a0, UArg a1)
         // Waits for an event to be posted associated with the calling thread.
         // Note that an event associated with a thread is posted when a
         // message is queued to the message receive queue of the thread
-
-#ifdef FREERTOS
-    mq_receive(syncEvent, (char*)&events, sizeof(uint32_t), NULL);
-#else
         events = Event_pend(syncEvent, Event_Id_NONE, MR_ALL_EVENTS,
         ICALL_TIMEOUT_FOREVER); // event_31 + event_30
-#endif
 
         if (events)
         {
@@ -1541,6 +1572,7 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
         {
             ICall_free(pAdvRpt->pData);
         }
+        logScan();
         break;
     }
 
@@ -1695,7 +1727,11 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
     }
     case JUXTA_EVT_SNIFF:
     {
-        GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+        if (!isAdvActive)
+        {
+            // Turn on advertising
+            GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+        }
         if (doDebug)
         {
             GPIO_write(LED_0, 1);
@@ -1705,7 +1741,7 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
     }
     case JUXTA_EVT_ALL_TIMEOUT:
     {
-        if (isAdvActive)
+        if (isAdvActive) // this event flips advertising, turn it off
         {
             // Turn off advertising
             GapAdv_disable(advHandle);
@@ -1722,9 +1758,36 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
     case JUXTA_EVT_RESET:
     {
         resetSniff();
-        GPIO_write(LED_0, 0);
-        GPIO_write(LED_1, 0);
         break;
+    }
+    case JUXTA_EVT_MAGNET_PERIODIC:
+    {
+        if (GPIO_read(MAGNET)) // magnet not present (active LOW)
+        {
+            if (isAdvActive)
+            {
+                // Turn off advertising
+                GapAdv_disable(advHandle);
+            }
+            GPIO_write(LED_0, 0);
+            GPIO_enableInt(MAGNET);
+            resetSniff(); // re-enables AXY_INT
+        }
+        else // magnet present
+        {
+            GPIO_disableInt(AXY_INT);
+            Util_stopClock(&clkJuxtaScanTimeout);
+            // in case sniff was active
+            multi_role_doStopDiscovering(0); // or GapScan_disable();
+            GPIO_write(LED_1, 0); // if debugging, LED_1 indicates scan
+            if (!isAdvActive)
+            {
+                // Turn on advertising
+                GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+            }
+            GPIO_toggle(LED_0);
+            Util_startClock(&clkJuxtaMagnet); // come back
+        }
     }
 
     default:
@@ -1998,11 +2061,7 @@ static status_t multi_role_enqueueMsg(uint8_t event, void *pData)
         pMsg->pData = pData;
 
         // Enqueue the message.
-#ifdef FREERTOS
-    success = Util_enqueueMsg(g_POSIX_appMsgQueue, syncEvent, (uint8_t *)pMsg);
-#else
         success = Util_enqueueMsg(appMsgQueue, syncEvent, (uint8_t*) pMsg);
-#endif
         return (success) ? SUCCESS : FAILURE;
     }
 
@@ -2154,6 +2213,10 @@ static void multi_role_clockHandler(UArg arg)
             multi_role_enqueueMsg(JUXTA_EVT_RESET, NULL);
         }
     }
+    else if (pData->event == JUXTA_EVT_MAGNET_PERIODIC)
+    {
+        multi_role_enqueueMsg(JUXTA_EVT_MAGNET_PERIODIC, NULL);
+    }
 }
 
 /*********************************************************************
@@ -2165,18 +2228,17 @@ static void multi_role_clockHandler(UArg arg)
  *
  * @return  none
  */
-static void multi_role_keyChangeHandler(uint8_t keys)
-{
-    uint8_t *pValue = ICall_malloc(sizeof(uint8_t));
-
-    if (pValue)
-    {
-        *pValue = keys;
-
-        multi_role_enqueueMsg(MR_EVT_KEY_CHANGE, pValue);
-    }
-}
-
+//static void multi_role_keyChangeHandler(uint8_t keys)
+//{
+//    uint8_t *pValue = ICall_malloc(sizeof(uint8_t));
+//
+//    if (pValue)
+//    {
+//        *pValue = keys;
+//
+//        multi_role_enqueueMsg(MR_EVT_KEY_CHANGE, pValue);
+//    }
+//}
 /*********************************************************************
  * @fn      multi_role_handleKeys
  *
@@ -3216,93 +3278,92 @@ bool multi_role_doAdvertise(uint8_t index)
  *
  * @return  none
  */
-static void multi_role_menuSwitchCb(tbmMenuObj_t *pMenuObjCurr,
-                                    tbmMenuObj_t *pMenuObjNext)
-{
-    // interested in only the events of
-    // entering mrMenuConnect, mrMenuSelectConn, and mrMenuMain for now
-    if (pMenuObjNext == &mrMenuConnect)
-    {
-        uint8_t i, j;
-        uint32_t itemsToDisable = MR_ITEM_NONE;
-
-        for (i = 0; i < TBM_GET_NUM_ITEM(&mrMenuConnect); i++)
-        {
-            for (j = 0; j < MAX_NUM_BLE_CONNS; j++)
-            {
-                if ((connList[j].connHandle != LINKDB_CONNHANDLE_INVALID)
-                        && !memcmp(TBM_GET_ACTION_DESC(&mrMenuConnect, i),
-                                   Util_convertBdAddr2Str(connList[j].addr),
-                                   MR_ADDR_STR_SIZE))
-                {
-                    // Already connected. Add to the set to be disabled.
-                    itemsToDisable |= (1 << i);
-                }
-            }
-        }
-
-        // Eventually only non-connected device addresses will be displayed.
-        tbm_setItemStatus(&mrMenuConnect,
-        MR_ITEM_ALL & ~itemsToDisable,
-                          itemsToDisable);
-    }
-    else if (pMenuObjNext == &mrMenuSelectConn)
-    {
-        static uint8_t *pAddrs;
-        uint8_t *pAddrTemp;
-
-        if (pAddrs != NULL)
-        {
-            ICall_free(pAddrs);
-        }
-
-        // Allocate buffer to display addresses
-        pAddrs = ICall_malloc(numConn * MR_ADDR_STR_SIZE);
-
-        if (pAddrs == NULL)
-        {
-            TBM_SET_NUM_ITEM(&mrMenuSelectConn, 0);
-        }
-        else
-        {
-            uint8_t i;
-
-            TBM_SET_NUM_ITEM(&mrMenuSelectConn, MAX_NUM_BLE_CONNS);
-
-            pAddrTemp = pAddrs;
-
-            // Add active connection info to the menu object
-            for (i = 0; i < MAX_NUM_BLE_CONNS; i++)
-            {
-                if (connList[i].connHandle != LINKDB_CONNHANDLE_INVALID)
-                {
-                    // This connection is active. Set the corresponding menu item with
-                    // the address of this connection and enable the item.
-                    memcpy(pAddrTemp, Util_convertBdAddr2Str(connList[i].addr),
-                    MR_ADDR_STR_SIZE);
-                    TBM_SET_ACTION_DESC(&mrMenuSelectConn, i, pAddrTemp);
-                    tbm_setItemStatus(&mrMenuSelectConn, (1 << i),
-                    MR_ITEM_NONE);
-                    pAddrTemp += MR_ADDR_STR_SIZE;
-                }
-                else
-                {
-                    // This connection is not active. Disable the corresponding menu item.
-                    tbm_setItemStatus(&mrMenuSelectConn, MR_ITEM_NONE,
-                                      (1 << i));
-                }
-            }
-        }
-    }
-    else if (pMenuObjNext == &mrMenuMain)
-    {
-        // Now we are not in a specific connection's context
-        mrConnHandle = LINKDB_CONNHANDLE_INVALID;
-
-        // Clear connection-related message
-        Display_clearLine(dispHandle, MR_ROW_CUR_CONN);
-    }
-}
-
+//static void multi_role_menuSwitchCb(tbmMenuObj_t *pMenuObjCurr,
+//                                    tbmMenuObj_t *pMenuObjNext)
+//{
+//    // interested in only the events of
+//    // entering mrMenuConnect, mrMenuSelectConn, and mrMenuMain for now
+//    if (pMenuObjNext == &mrMenuConnect)
+//    {
+//        uint8_t i, j;
+//        uint32_t itemsToDisable = MR_ITEM_NONE;
+//
+//        for (i = 0; i < TBM_GET_NUM_ITEM(&mrMenuConnect); i++)
+//        {
+//            for (j = 0; j < MAX_NUM_BLE_CONNS; j++)
+//            {
+//                if ((connList[j].connHandle != LINKDB_CONNHANDLE_INVALID)
+//                        && !memcmp(TBM_GET_ACTION_DESC(&mrMenuConnect, i),
+//                                   Util_convertBdAddr2Str(connList[j].addr),
+//                                   MR_ADDR_STR_SIZE))
+//                {
+//                    // Already connected. Add to the set to be disabled.
+//                    itemsToDisable |= (1 << i);
+//                }
+//            }
+//        }
+//
+//        // Eventually only non-connected device addresses will be displayed.
+//        tbm_setItemStatus(&mrMenuConnect,
+//        MR_ITEM_ALL & ~itemsToDisable,
+//                          itemsToDisable);
+//    }
+//    else if (pMenuObjNext == &mrMenuSelectConn)
+//    {
+//        static uint8_t *pAddrs;
+//        uint8_t *pAddrTemp;
+//
+//        if (pAddrs != NULL)
+//        {
+//            ICall_free(pAddrs);
+//        }
+//
+//        // Allocate buffer to display addresses
+//        pAddrs = ICall_malloc(numConn * MR_ADDR_STR_SIZE);
+//
+//        if (pAddrs == NULL)
+//        {
+//            TBM_SET_NUM_ITEM(&mrMenuSelectConn, 0);
+//        }
+//        else
+//        {
+//            uint8_t i;
+//
+//            TBM_SET_NUM_ITEM(&mrMenuSelectConn, MAX_NUM_BLE_CONNS);
+//
+//            pAddrTemp = pAddrs;
+//
+//            // Add active connection info to the menu object
+//            for (i = 0; i < MAX_NUM_BLE_CONNS; i++)
+//            {
+//                if (connList[i].connHandle != LINKDB_CONNHANDLE_INVALID)
+//                {
+//                    // This connection is active. Set the corresponding menu item with
+//                    // the address of this connection and enable the item.
+//                    memcpy(pAddrTemp, Util_convertBdAddr2Str(connList[i].addr),
+//                    MR_ADDR_STR_SIZE);
+//                    TBM_SET_ACTION_DESC(&mrMenuSelectConn, i, pAddrTemp);
+//                    tbm_setItemStatus(&mrMenuSelectConn, (1 << i),
+//                    MR_ITEM_NONE);
+//                    pAddrTemp += MR_ADDR_STR_SIZE;
+//                }
+//                else
+//                {
+//                    // This connection is not active. Disable the corresponding menu item.
+//                    tbm_setItemStatus(&mrMenuSelectConn, MR_ITEM_NONE,
+//                                      (1 << i));
+//                }
+//            }
+//        }
+//    }
+//    else if (pMenuObjNext == &mrMenuMain)
+//    {
+//        // Now we are not in a specific connection's context
+//        mrConnHandle = LINKDB_CONNHANDLE_INVALID;
+//
+//        // Clear connection-related message
+//        Display_clearLine(dispHandle, MR_ROW_CUR_CONN);
+//    }
+//}
 /*********************************************************************
  *********************************************************************/
