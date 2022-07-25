@@ -5,49 +5,18 @@
  @brief This file contains the multi_role sample application for use
  with the CC2650 Bluetooth Low Energy Protocol Stack.
 
- Group: WCS, BTS
  Target Device: cc13xx_cc26xx
 
- ******************************************************************************
-
- Copyright (c) 2013-2022, Texas Instruments Incorporated
- All rights reserved.
-
- Redistribution and use in source and binary forms, with or without
- modification, are permitted provided that the following conditions
- are met:
-
- *  Redistributions of source code must retain the above copyright
- notice, this list of conditions and the following disclaimer.
-
- *  Redistributions in binary form must reproduce the above copyright
- notice, this list of conditions and the following disclaimer in the
- documentation and/or other materials provided with the distribution.
-
- *  Neither the name of Texas Instruments Incorporated nor the names of
- its contributors may be used to endorse or promote products derived
- from this software without specific prior written permission.
-
- THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
- AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
- THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
- PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR
- CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
- EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
- PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
- OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
- WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
- OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE,
- EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
- ******************************************************************************
-
-
- *****************************************************************************/
+ ******************************************************************************/
 
 /*********************************************************************
  * INCLUDES
  */
+#include <unistd.h>
+//#include <stdint.h>
+//#include <stddef.h>
+#include <string.h>
+
 #ifdef FREERTOS
 #include <FreeRTOS.h>
 #include <task.h>
@@ -116,6 +85,11 @@
 #define MR_EVT_PERIODIC            11
 #define MR_EVT_READ_RPA            12
 #define MR_EVT_INSUFFICIENT_MEM    13
+#define JUXTA_EVT_SNIFF            14
+#define JUXTA_EVT_ALL_TIMEOUT      15
+#define JUXTA_EVT_ADV_TIMEOUT      16
+#define JUXTA_EVT_SCAN_TIMEOUT     17
+#define JUXTA_EVT_RESET            18
 
 // Internal Events for RTOS application
 #define MR_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
@@ -163,7 +137,10 @@ typedef enum
 #define MR_ADDR_STR_SIZE     15
 
 // How often to perform periodic event (in msec)
-#define MR_PERIODIC_EVT_PERIOD               5000
+#define MR_PERIODIC_EVT_PERIOD          5000
+#define JUXTA_ADV_TIMEOUT_PERIOD        2000
+#define JUXTA_SCAN_TIMEOUT_PERIOD       1000 // less than DEFAULT_SCAN_DURATION
+#define JUXTA_SCAN_N_TIMES              5
 
 #define CONNINDEX_INVALID  0xFF
 
@@ -291,34 +268,14 @@ mrClockEventData_t periodicUpdateData = { .event = MR_EVT_PERIODIC };
 
 // Memory to pass RPA read event ID to clock handler
 mrClockEventData_t argRpaRead = { .event = MR_EVT_READ_RPA };
-#ifdef FREERTOS
-/*Non blocking queue */
- mqd_t g_POSIX_appMsgQueue;
 
-#else
 // Queue object used for app messages
 static Queue_Struct appMsg;
 static Queue_Handle appMsgQueue;
-#endif
 
 // Task configuration
-#ifdef FREERTOS
-typedef uint32_t * Task_Handle;
-TaskHandle_t mrTask = NULL;
-#else
 Task_Struct mrTask;
-#endif
-
-#ifndef FREERTOS
-#if defined __TI_COMPILER_VERSION__
-#pragma DATA_ALIGN(mrTaskStack, 8)
-#else
-#pragma data_alignment=8
-#endif
-#ifndef FREERTOS
 uint8_t mrTaskStack[MR_TASK_STACK_SIZE];
-#endif
-#endif
 
 // Maximim PDU size (default = 27 octets)
 static uint16 mrMaxPduSize;
@@ -363,6 +320,18 @@ static uint8 rpa[B_ADDR_LEN] = { 0 };
 // Initiating PHY
 static uint8_t mrInitPhy = INIT_PHY_1M;
 
+//**** JUXTA ****
+SPI_Handle spiHandle;
+static Clock_Struct clkJuxtaAdvTimeout;
+static Clock_Struct clkJuxtaScanTimeout;
+
+mrClockEventData_t argJuxtaAdvTimeout = { .event = JUXTA_EVT_ADV_TIMEOUT };
+mrClockEventData_t argJuxtaScanTimeout = { .event = JUXTA_EVT_SCAN_TIMEOUT };
+
+static bool sniffAdv = true;
+static bool doDebug = true;
+static uint8_t scanCount = 0;
+
 /*********************************************************************
  * LOCAL FUNCTIONS
  */
@@ -370,11 +339,7 @@ static void multi_role_init(void);
 static void multi_role_scanInit(void);
 static void multi_role_advertInit(void);
 
-#ifdef FREERTOS
-static void multi_role_taskFxn(void *a0);
-#else//TI_RTOS
 static void multi_role_taskFxn(UArg a0, UArg a1);
-#endif
 
 static uint8_t multi_role_processStackMsg(ICall_Hdr *pMsg);
 static uint8_t multi_role_processGATTMsg(gattMsgEvent_t *pMsg);
@@ -395,11 +360,8 @@ static void multi_role_keyChangeHandler(uint8_t keys);
 static uint8_t multi_role_addConnInfo(uint16_t connHandle, uint8_t *pAddr,
                                       uint8_t role);
 static void multi_role_performPeriodicTask(void);
-#ifdef FREERTOS
-static void multi_role_clockHandler(void * arg);
-#else
 static void multi_role_clockHandler(UArg arg);
-#endif
+
 static uint8_t multi_role_clearConnListEntry(uint16_t connHandle);
 #if (DEFAULT_DEV_DISC_BY_SVC_UUID == TRUE)
 static void multi_role_addScanInfo(uint8_t *pAddr, uint8_t addrType);
@@ -445,9 +407,34 @@ static gapBondCBs_t multi_role_BondMgrCBs = { multi_role_passcodeCB, // Passcode
  * PUBLIC FUNCTIONS
  */
 
-void sniffInterrupt(void)
+static void resetSniff(void)
 {
+    MC36XX_interrupt_event_t evt_mc36xx = { 0 };
+    if (spiHandle != NULL)
+    {
+        MC3635_INTHandler(spiHandle, &evt_mc36xx);
+        MC3635_sensorSniff(spiHandle);
+    }
+}
 
+void sniffInterrupt(void) // not static, referenced in sysConfig
+{
+    multi_role_enqueueMsg(JUXTA_EVT_SNIFF, NULL);
+}
+
+static void blink(uint8_t runOnce)
+{
+    while (1)
+    {
+        GPIO_write(LED_1, 1);
+        usleep(50000);
+        GPIO_write(LED_1, 0);
+        usleep(50000);
+        if (runOnce == 1)
+        {
+            break;
+        }
+    }
 }
 
 /*********************************************************************
@@ -479,25 +466,6 @@ static void multi_role_spin(void)
 
 void multi_role_createTask(void)
 {
-
-#ifdef FREERTOS
-    BaseType_t xReturned;
-
-    /* Create the task, storing the handle. */
-    xReturned = xTaskCreate(
-            multi_role_taskFxn,                     /* Function that implements the task. */
-            "MULTI_ROLE_APP",                       /* Text name for the task. */
-            MR_TASK_STACK_SIZE / sizeof(uint32_t),  /* Stack size in words, not bytes. */
-            ( void * ) NULL,                        /* Parameter passed into the task. */
-            MR_TASK_PRIORITY,                       /* Priority at which the task is created. */
-            &mrTask );                              /* Used to pass out the created task's handle. */
-
-    if(xReturned == errCOULD_NOT_ALLOCATE_REQUIRED_MEMORY)
-    {
-        /* Creation of FreeRTOS task failed */
-        while(1);
-    }
-#else
     Task_Params taskParams;
 
     // Configure task
@@ -506,9 +474,6 @@ void multi_role_createTask(void)
     taskParams.stackSize = MR_TASK_STACK_SIZE;
     taskParams.priority = MR_TASK_PRIORITY;
     Task_construct(&mrTask, multi_role_taskFxn, &taskParams, NULL);
-
-#endif
-
 }
 
 /*********************************************************************
@@ -528,6 +493,17 @@ static void multi_role_init(void)
     GPIO_init();
     SPI_init();
     GPIO_write(LED_0, 1);
+
+    spiHandle = MC3635_init(CONFIG_SPI);
+    if (spiHandle == NULL)
+    {
+        blink(0); // error
+    }
+    if (!MC3635_start(spiHandle))
+    {
+        blink(0); // error
+    }
+    MC3635_sensorSniff(spiHandle);
 
     BLE_LOG_INT_TIME(0, BLE_LOG_MODULE_APP, "APP : ---- init ", MR_TASK_PRIORITY);
     // MGRM Create the menu
@@ -553,23 +529,22 @@ static void multi_role_init(void)
     // MGRM clear out connection menu
 //    tbm_setItemStatus(&mrMenuConnect, MR_ITEM_NONE, MR_ITEM_ALL);
 
-#ifdef FREERTOS
-  Util_constructQueue(&g_POSIX_appMsgQueue);
-#else
     // Create an RTOS queue for message from profile to be sent to app.
     appMsgQueue = Util_constructQueue(&appMsg);
-#endif
-    // Create one-shot clock for internal periodic events.
-#ifdef FREERTOS
-  Util_constructClock(&clkPeriodic,(void*) multi_role_clockHandler,
-                        MR_PERIODIC_EVT_PERIOD, 0, false,
-                        (void*)&periodicUpdateData);
-#else
 
+    // Create one-shot clock for internal periodic events.
     Util_constructClock(&clkPeriodic, multi_role_clockHandler,
     MR_PERIODIC_EVT_PERIOD,
                         0, false, (UArg) &periodicUpdateData);
-#endif
+
+    // Create one-shot clocks for Juxta timeouts
+    Util_constructClock(&clkJuxtaAdvTimeout, multi_role_clockHandler,
+    JUXTA_ADV_TIMEOUT_PERIOD,
+                        0, false, (UArg) &argJuxtaAdvTimeout);
+
+    Util_constructClock(&clkJuxtaScanTimeout, multi_role_clockHandler,
+    JUXTA_SCAN_TIMEOUT_PERIOD,
+                        0, false, (UArg) &argJuxtaScanTimeout);
 
     // MGRM Init key debouncer
 //    Board_initKeys(multi_role_keyChangeHandler);
@@ -668,8 +643,7 @@ static void multi_role_init(void)
 
     GPIO_write(LED_0, 0);
     GPIO_write(LED_1, 0);
-
-//    multi_role_doAdvertise(0);
+    GPIO_enableInt(AXY_INT);
 }
 
 /*********************************************************************
@@ -833,8 +807,8 @@ static uint8_t multi_role_processStackMsg(ICall_Hdr *pMsg)
                 else
                 {
                     Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
-                                   "PHY Update Status: 0x%02x",
-                                   pMyMsg->cmdStatus);
+                            "PHY Update Status: 0x%02x",
+                            pMyMsg->cmdStatus);
                 }
             }
                 break;
@@ -844,8 +818,8 @@ static uint8_t multi_role_processStackMsg(ICall_Hdr *pMsg)
             default:
             {
                 Display_printf(dispHandle, MR_ROW_NON_CONN, 0,
-                               "Unknown Cmd Status: 0x%04x::0x%02x",
-                               pMyMsg->cmdOpcode, pMyMsg->cmdStatus);
+                        "Unknown Cmd Status: 0x%04x::0x%02x",
+                        pMyMsg->cmdOpcode, pMyMsg->cmdStatus);
             }
                 break;
             }
@@ -864,8 +838,8 @@ static uint8_t multi_role_processStackMsg(ICall_Hdr *pMsg)
                 {
 
                     Display_printf(dispHandle, MR_ROW_ANY_CONN, 0,
-                                   "%s: PHY change failure",
-                                   multi_role_getConnAddrStr(pPUC->connHandle));
+                            "%s: PHY change failure",
+                            multi_role_getConnAddrStr(pPUC->connHandle));
                 }
                 else
                 {
@@ -876,11 +850,11 @@ static uint8_t multi_role_processStackMsg(ICall_Hdr *pMsg)
                             // Only symmetrical PHY is supported.
                             // rxPhy should be equal to txPhy.
                             (pPUC->rxPhy == PHY_UPDATE_COMPLETE_EVENT_1M) ?
-                                    "1 Mbps" :
+                            "1 Mbps" :
                             (pPUC->rxPhy == PHY_UPDATE_COMPLETE_EVENT_2M) ?
-                                    "2 Mbps" :
+                            "2 Mbps" :
                             (pPUC->rxPhy == PHY_UPDATE_COMPLETE_EVENT_CODED) ?
-                                    "Coded" : "Unexpected PHY Value");
+                            "Coded" : "Unexpected PHY Value");
                 }
             }
 
@@ -949,8 +923,7 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
 
             BLE_LOG_INT_INT(0, BLE_LOG_MODULE_APP, "APP : ---- start advert %d,%d\n", 0, 0);
             //Setup and start advertising
-//            multi_role_advertInit();
-
+            multi_role_advertInit();
         }
 
         //Setup scanning
@@ -966,10 +939,8 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
 
         //Display initialized state status
         Display_printf(dispHandle, MR_ROW_NUM_CONN, 0, "Num Conns: %d",
-                       numConn);
-        Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Initialized");
-        Display_printf(dispHandle, MR_ROW_MYADDRSS, 0, "Multi-Role Address: %s",
-                       (char*) Util_convertBdAddr2Str(pPkt->devAddr));
+                numConn);Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Initialized");Display_printf(dispHandle, MR_ROW_MYADDRSS, 0, "Multi-Role Address: %s",
+                (char*) Util_convertBdAddr2Str(pPkt->devAddr));
 
         break;
     }
@@ -985,7 +956,7 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
         }
 
         Display_printf(dispHandle, MR_ROW_NON_CONN, 0,
-                       "Conneting attempt cancelled");
+                "Conneting attempt cancelled");
 
         // Enable "Discover Devices", "Connect To", and "Set Scanning PHY"
         // and disable everything else.
@@ -1020,9 +991,8 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
         pStrAddr = (uint8_t*) Util_convertBdAddr2Str(connList[connIndex].addr);
 
         Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Connected to %s",
-                       pStrAddr);
-        Display_printf(dispHandle, MR_ROW_NUM_CONN, 0, "Num Conns: %d",
-                       numConn);
+                pStrAddr);Display_printf(dispHandle, MR_ROW_NUM_CONN, 0, "Num Conns: %d",
+                numConn);
 
         // Disable "Connect To" until another discovery is performed
         itemsToDisable |= MR_ITEM_CONNECT;
@@ -1053,6 +1023,7 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
         MR_ITEM_ALL & ~(itemsToDisable),
                           itemsToDisable);
 
+        // Matt: this will always disable because MAX_NUM_BLE_CONNS = 1
         if (numConn < MAX_NUM_BLE_CONNS)
         {
             // Start advertising since there is room for more connections
@@ -1088,9 +1059,8 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
         pStrAddr = (uint8_t*) Util_convertBdAddr2Str(connList[connIndex].addr);
 
         Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "%s is disconnected",
-                       pStrAddr);
-        Display_printf(dispHandle, MR_ROW_NUM_CONN, 0, "Num Conns: %d",
-                       numConn);
+                pStrAddr);Display_printf(dispHandle, MR_ROW_NUM_CONN, 0, "Num Conns: %d",
+                numConn);
 
         for (i = 0; i < TBM_GET_NUM_ITEM(&mrMenuConnect); i++)
         {
@@ -1108,7 +1078,11 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
         }
 
         // Start advertising since there is room for more connections
-        GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+        // Matt: unless sniffAdv mode = true
+        if (!sniffAdv)
+        {
+            GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+        }
 
         if (numConn > 0)
         {
@@ -1195,8 +1169,8 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
             {
                 // Display the address of the connection update failure
                 Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
-                               "Update Failed 0x%h: %s", pPkt->opcode,
-                               Util_convertBdAddr2Str(linkInfo.addr));
+                        "Update Failed 0x%h: %s", pPkt->opcode,
+                        Util_convertBdAddr2Str(linkInfo.addr));
             }
         }
         // Check if there are any queued parameter updates
@@ -1323,30 +1297,26 @@ static void multi_role_advertInit(void)
 
     BLE_LOG_INT_TIME(0, BLE_LOG_MODULE_APP, "APP : ---- GapAdv_enable", 0);
     // Enable legacy advertising for set #1
-    status = GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+    if (!sniffAdv)
+    {
+        status = GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+    }
 
     if (status != SUCCESS)
     {
         mrIsAdvertising = false;
         Display_printf(dispHandle, MR_ROW_ADVERTIS, 0,
-                       "Error: Failed to Start Advertising!");
+                "Error: Failed to Start Advertising!");
     }
 
     if (addrMode > ADDRMODE_RANDOM)
     {
         multi_role_updateRPA();
-#ifdef FREERTOS
-    // Create one-shot clock for RPA check event.
-    Util_constructClock(&clkRpaRead, (void*)multi_role_clockHandler,
-                        READ_RPA_PERIOD, 0, true,
-                        (void*) &argRpaRead);
 
-#else
         // Create one-shot clock for RPA check event.
         Util_constructClock(&clkRpaRead, multi_role_clockHandler,
         READ_RPA_PERIOD,
                             0, true, (UArg) &argRpaRead);
-#endif
     }
 }
 
@@ -1394,13 +1364,13 @@ static uint8_t multi_role_processGATTMsg(gattMsgEvent_t *pMsg)
 
         // Display the opcode of the message that caused the violation.
         Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "FC Violated: %d",
-                       pMsg->msg.flowCtrlEvt.opcode);
+                pMsg->msg.flowCtrlEvt.opcode);
     }
     else if (pMsg->method == ATT_MTU_UPDATED_EVENT)
     {
         // MTU size updated
         Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "MTU Size: %d",
-                       pMsg->msg.mtuEvt.MTU);
+                pMsg->msg.mtuEvt.MTU);
     }
 
     // Messages from GATT server
@@ -1413,13 +1383,13 @@ static uint8_t multi_role_processGATTMsg(gattMsgEvent_t *pMsg)
             if (pMsg->method == ATT_ERROR_RSP)
             {
                 Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "Read Error %d",
-                               pMsg->msg.errorRsp.errCode);
+                        pMsg->msg.errorRsp.errCode);
             }
             else
             {
                 // After a successful read, display the read value
                 Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "Read rsp: %d",
-                               pMsg->msg.readRsp.pValue[0]);
+                        pMsg->msg.readRsp.pValue[0]);
             }
 
         }
@@ -1431,14 +1401,14 @@ static uint8_t multi_role_processGATTMsg(gattMsgEvent_t *pMsg)
             if (pMsg->method == ATT_ERROR_RSP)
             {
                 Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "Write Error %d",
-                               pMsg->msg.errorRsp.errCode);
+                        pMsg->msg.errorRsp.errCode);
             }
             else
             {
                 // After a succesful write, display the value that was written and
                 // increment value
                 Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "Write sent: %d",
-                               charVal);
+                        charVal);
             }
 
             tbm_goTo(&mrMenuPerConn);
@@ -1524,6 +1494,7 @@ static void multi_role_processParamUpdate(uint16_t connHandle)
 static void multi_role_processAppMsg(mrEvt_t *pMsg)
 {
     bool safeToDealloc = TRUE;
+    bool isAdvActive = mrIsAdvertising; // Matt
 
     if (pMsg->event <= APP_EVT_EVENT_MAX)
     {
@@ -1558,11 +1529,11 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
         {
             multi_role_addScanInfo(pAdvRpt->addr, pAdvRpt->addrType);
             Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "Discovered: %s",
-                           Util_convertBdAddr2Str(pAdvRpt->addr));
+                    Util_convertBdAddr2Str(pAdvRpt->addr));
         }
 #else // !DEFAULT_DEV_DISC_BY_SVC_UUID
-      Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "Discovered: %s",
-                     Util_convertBdAddr2Str(pAdvRpt->addr));
+        Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "Discovered: %s",
+                       Util_convertBdAddr2Str(pAdvRpt->addr));
 #endif // DEFAULT_DEV_DISC_BY_SVC_UUID
 
         // Free scan payload data
@@ -1600,7 +1571,7 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
 #endif // DEFAULT_DEV_DISC_BY_SVC_UUID
 
         Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "%d devices discovered",
-                       numReport);
+                numReport);
 
         if (numReport > 0)
         {
@@ -1642,12 +1613,12 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
                 memcpy(pAddrTemp, Util_convertBdAddr2Str(scanList[i].addr),
                 MR_ADDR_STR_SIZE);
 #else // !DEFAULT_DEV_DISC_BY_SVC_UUID
-          // Get the address from the report, convert it to string, and
-          // copy the string to the address buffer
-          GapScan_getAdvReport(i, &advRpt);
-          memcpy(pAddrTemp, Util_convertBdAddr2Str(advRpt.addr),
-                 MR_ADDR_STR_SIZE);
-  #endif // DEFAULT_DEV_DISC_BY_SVC_UUID
+                // Get the address from the report, convert it to string, and
+                // copy the string to the address buffer
+                GapScan_getAdvReport(i, &advRpt);
+                memcpy(pAddrTemp, Util_convertBdAddr2Str(advRpt.addr),
+                MR_ADDR_STR_SIZE);
+#endif // DEFAULT_DEV_DISC_BY_SVC_UUID
 
                 // Assign the string to the corresponding action description of the menu
                 TBM_SET_ACTION_DESC(&mrMenuConnect, i, pAddrTemp);
@@ -1722,6 +1693,39 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
 #endif //__GNUC__
         break;
     }
+    case JUXTA_EVT_SNIFF:
+    {
+        GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+        if (doDebug)
+        {
+            GPIO_write(LED_0, 1);
+        }
+        Util_startClock(&clkJuxtaAdvTimeout);
+        break;
+    }
+    case JUXTA_EVT_ALL_TIMEOUT:
+    {
+        if (isAdvActive)
+        {
+            // Turn off advertising
+            GapAdv_disable(advHandle);
+        }
+        multi_role_doDiscoverDevices(0); // 0 index for menu
+        GPIO_write(LED_0, 0);
+        GPIO_write(LED_1, 0);
+        if (doDebug)
+        {
+            GPIO_write(LED_1, 1);
+        }
+        break;
+    }
+    case JUXTA_EVT_RESET:
+    {
+        resetSniff();
+        GPIO_write(LED_0, 0);
+        GPIO_write(LED_1, 0);
+        break;
+    }
 
     default:
         // Do nothing.
@@ -1749,23 +1753,23 @@ static void multi_role_processAdvEvent(mrGapAdvEventData_t *pEventData)
         BLE_LOG_INT_TIME(0, BLE_LOG_MODULE_APP, "APP : ---- GAP_EVT_ADV_START_AFTER_ENABLE", 0);
         mrIsAdvertising = true;
         Display_printf(dispHandle, MR_ROW_ADVERTIS, 0, "Adv Set %d Enabled",
-                       *(uint8_t*) (pEventData->pBuf));
+                *(uint8_t*) (pEventData->pBuf));
         break;
 
     case GAP_EVT_ADV_END_AFTER_DISABLE :
         mrIsAdvertising = false;
         Display_printf(dispHandle, MR_ROW_ADVERTIS, 0, "Adv Set %d Disabled",
-                       *(uint8_t*) (pEventData->pBuf));
+                *(uint8_t*) (pEventData->pBuf));
         break;
 
     case GAP_EVT_ADV_START :
         Display_printf(dispHandle, MR_ROW_ADVERTIS, 0, "Adv Started %d Enabled",
-                       *(uint8_t*) (pEventData->pBuf));
+                *(uint8_t*) (pEventData->pBuf));
         break;
 
     case GAP_EVT_ADV_END :
         Display_printf(dispHandle, MR_ROW_ADVERTIS, 0, "Adv Ended %d Disabled",
-                       *(uint8_t*) (pEventData->pBuf));
+                *(uint8_t*) (pEventData->pBuf));
         break;
 
     case GAP_EVT_ADV_SET_TERMINATED :
@@ -1775,8 +1779,8 @@ static void multi_role_processAdvEvent(mrGapAdvEventData_t *pEventData)
         GapAdv_setTerm_t *advSetTerm = (GapAdv_setTerm_t*) (pEventData->pBuf);
 #endif
         Display_printf(dispHandle, MR_ROW_ADVERTIS, 0,
-                       "Adv Set %d disabled after conn %d", advSetTerm->handle,
-                       advSetTerm->connHandle);
+                "Adv Set %d disabled after conn %d", advSetTerm->handle,
+                advSetTerm->connHandle);
     }
         break;
 
@@ -2023,14 +2027,14 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramId)
         SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, &newValue);
 
         Display_printf(dispHandle, MR_ROW_CHARSTAT, 0, "Char 1: %d",
-                       (uint16_t) newValue);
+                (uint16_t) newValue);
         break;
 
     case SIMPLEPROFILE_CHAR3:
         SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, &newValue);
 
         Display_printf(dispHandle, MR_ROW_CHARSTAT, 0, "Char 3: %d",
-                       (uint16_t) newValue);
+                (uint16_t) newValue);
         break;
 
     default:
@@ -2089,7 +2093,7 @@ static void multi_role_updateRPA(void)
     {
         // If the RPA has changed, update the display
         Display_printf(dispHandle, MR_ROW_RPA, 0, "RP Addr: %s",
-                       Util_convertBdAddr2Str(pRpaNew));
+                Util_convertBdAddr2Str(pRpaNew));
         memcpy(rpa, pRpaNew, B_ADDR_LEN);
     }
 }
@@ -2103,11 +2107,7 @@ static void multi_role_updateRPA(void)
  *
  * @return  None.
  */
-#ifdef FREERTOS
-static void multi_role_clockHandler(void * arg)
-#else
 static void multi_role_clockHandler(UArg arg)
-#endif
 {
     mrClockEventData_t *pData = (mrClockEventData_t*) arg;
 
@@ -2131,6 +2131,28 @@ static void multi_role_clockHandler(UArg arg)
     {
         // Send message to app
         multi_role_enqueueMsg(MR_EVT_SEND_PARAM_UPDATE, pData);
+    }
+    else if (pData->event == JUXTA_EVT_ADV_TIMEOUT)
+    {
+        multi_role_enqueueMsg(JUXTA_EVT_ALL_TIMEOUT, NULL);
+        Util_startClock(&clkJuxtaScanTimeout); // first time
+    }
+    else if (pData->event == JUXTA_EVT_SCAN_TIMEOUT)
+    {
+        scanCount++;
+        // Start the next period
+        if (scanCount < JUXTA_SCAN_N_TIMES)
+        {
+            // start the next timeout
+            Util_startClock(&clkJuxtaScanTimeout);
+            multi_role_enqueueMsg(JUXTA_EVT_ALL_TIMEOUT, NULL);
+        }
+        else
+        {
+            scanCount = 0;
+            // done scanning, reset sniff/interrupt
+            multi_role_enqueueMsg(JUXTA_EVT_RESET, NULL);
+        }
     }
 }
 
@@ -2489,8 +2511,8 @@ static void multi_role_processPairState(mrPairStateData_t *pPairData)
                 {
                     // Update the address of the peer to the ID address
                     Display_printf(dispHandle, MR_ROW_NON_CONN, 0,
-                                   "Addr updated: %s",
-                                   Util_convertBdAddr2Str(linkInfo.addr));
+                            "Addr updated: %s",
+                            Util_convertBdAddr2Str(linkInfo.addr));
 
                     // Update the connection list with the ID address
                     uint8_t i = multi_role_getConnIndex(pPairData->connHandle);
@@ -2503,7 +2525,7 @@ static void multi_role_processPairState(mrPairStateData_t *pPairData)
         else
         {
             Display_printf(dispHandle, MR_ROW_SECURITY, 0, "Pairing fail: %d",
-                           status);
+                    status);
         }
         break;
 
@@ -2511,12 +2533,12 @@ static void multi_role_processPairState(mrPairStateData_t *pPairData)
         if (status == SUCCESS)
         {
             Display_printf(dispHandle, MR_ROW_SECURITY, 0,
-                           "Encryption success");
+                    "Encryption success");
         }
         else
         {
             Display_printf(dispHandle, MR_ROW_SECURITY, 0,
-                           "Encryption failed: %d", status);
+                    "Encryption failed: %d", status);
         }
         break;
 
@@ -2528,7 +2550,7 @@ static void multi_role_processPairState(mrPairStateData_t *pPairData)
         else
         {
             Display_printf(dispHandle, MR_ROW_SECURITY, 0,
-                           "Bond save failed: %d", status);
+                    "Bond save failed: %d", status);
         }
 
         break;
@@ -2551,7 +2573,7 @@ static void multi_role_processPasscode(mrPasscodeData_t *pData)
     if (pData->uiOutputs != 0)
     {
         Display_printf(dispHandle, MR_ROW_SECURITY, 0, "Passcode: %d",
-        B_APP_DEFAULT_PASSCODE);
+                B_APP_DEFAULT_PASSCODE);
     }
 
     // Send passcode response
@@ -2756,9 +2778,9 @@ bool multi_role_doDiscoverDevices(uint8_t index)
     numScanRes = 0;
     GapScan_enable(0, DEFAULT_SCAN_DURATION, 0);
 #else // !DEFAULT_DEV_DISC_BY_SVC_UUID
-  // Scanning for DEFAULT_SCAN_DURATION x 10 ms.
-  // Let the stack record the advertising reports as many as up to DEFAULT_MAX_SCAN_RES.
-  GapScan_enable(0, DEFAULT_SCAN_DURATION, DEFAULT_MAX_SCAN_RES);
+    // Scanning for DEFAULT_SCAN_DURATION x 10 ms.
+    // Let the stack record the advertising reports as many as up to DEFAULT_MAX_SCAN_RES.
+    GapScan_enable(0, DEFAULT_SCAN_DURATION, DEFAULT_MAX_SCAN_RES);
 #endif // DEFAULT_DEV_DISC_BY_SVC_UUID
     // Enable only "Stop Discovering" and disable all others in the main menu
     tbm_setItemStatus(&mrMenuMain, MR_ITEM_STOPDISC,
@@ -2828,24 +2850,27 @@ bool multi_role_doConnect(uint8_t index)
     GapInit_connect(scanList[index].addrType & MASK_ADDRTYPE_ID,
                     scanList[index].addr, mrInitPhy, 0);
 #else // !DEFAULT_DEV_DISC_BY_SVC_UUID
-  GapScan_Evt_AdvRpt_t advRpt;
+    GapScan_Evt_AdvRpt_t advRpt;
 
-  GapScan_getAdvReport(index, &advRpt);
+    GapScan_getAdvReport(index, &advRpt);
 
-  GapInit_connect(advRpt.addrType & MASK_ADDRTYPE_ID,
-                  advRpt.addr, mrInitPhy, 0);
+    GapInit_connect(advRpt.addrType & MASK_ADDRTYPE_ID, advRpt.addr, mrInitPhy,
+                    0);
 #endif // DEFAULT_DEV_DISC_BY_SVC_UUID
 
-    // Re-enable advertising
-    GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+    // Re-enable advertising, check for Juxta sniffAdv
+    if (!sniffAdv)
+    {
+        GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
 
-    // Enable only "Cancel Connecting" and disable all others in the main menu
-    tbm_setItemStatus(&mrMenuMain, MR_ITEM_CANCELCONN,
-                      (MR_ITEM_ALL & ~MR_ITEM_CANCELCONN));
+        // Enable only "Cancel Connecting" and disable all others in the main menu
+        tbm_setItemStatus(&mrMenuMain, MR_ITEM_CANCELCONN,
+                          (MR_ITEM_ALL & ~MR_ITEM_CANCELCONN));
 
-    Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Connecting...");
+        Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Connecting...");
 
-    tbm_goTo(&mrMenuMain);
+        tbm_goTo(&mrMenuMain);
+    }
 
     return (true);
 }
@@ -2991,15 +3016,15 @@ bool multi_role_doConnUpdate(uint8_t index)
         GAP_UpdateLinkParamReq(&params);
 
         Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
-                       "Param update Request:connTimeout =%d",
-                       params.connTimeout * CONN_TIMEOUT_MS_CONVERSION);
+                "Param update Request:connTimeout =%d",
+                params.connTimeout * CONN_TIMEOUT_MS_CONVERSION);
     }
     else
     {
 
         Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
-                       "update :%s, Unable to find link information",
-                       Util_convertBdAddr2Str(linkInfo.addr));
+                "update :%s, Unable to find link information",
+                Util_convertBdAddr2Str(linkInfo.addr));
     }
 
     return (true);
@@ -3024,8 +3049,8 @@ bool multi_role_doConnPhy(uint8_t index)
                      MRMenu_connPhy[index].value, 0);
 
     Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
-                   "Connection PHY preference: %s",
-                   TBM_GET_ACTION_DESC(&mrMenuConnPhy, index));
+            "Connection PHY preference: %s",
+            TBM_GET_ACTION_DESC(&mrMenuConnPhy, index));
 
     return (true);
 }
@@ -3043,8 +3068,8 @@ bool multi_role_doSetInitPhy(uint8_t index)
 {
     mrInitPhy = MRMenu_initPhy[index].value;
     Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
-                   "Initialize PHY preference: %s",
-                   TBM_GET_ACTION_DESC(&mrMenuInitPhy, index));
+            "Initialize PHY preference: %s",
+            TBM_GET_ACTION_DESC(&mrMenuInitPhy, index));
 
     return (true);
 }
@@ -3064,7 +3089,7 @@ bool multi_role_doSetScanPhy(uint8_t index)
     GapScan_setParam(SCAN_PARAM_PRIM_PHYS, &MRMenu_scanPhy[index].value);
 
     Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Primary Scan PHY: %s",
-                   TBM_GET_ACTION_DESC(&mrMenuScanPhy, index));
+            TBM_GET_ACTION_DESC(&mrMenuScanPhy, index));
 
     return (true);
 }
@@ -3077,6 +3102,7 @@ bool multi_role_doSetScanPhy(uint8_t index)
  * @param   index - item number in MRMenu_advPhy list
  *
  * @return  always true
+ * !! Matt, rm
  */
 bool multi_role_doSetAdvPhy(uint8_t index)
 {
@@ -3117,8 +3143,8 @@ bool multi_role_doSetAdvPhy(uint8_t index)
     }
 
     Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
-                   "Advertise PHY preference: %s",
-                   TBM_GET_ACTION_DESC(&mrMenuAdvPhy, index));
+            "Advertise PHY preference: %s",
+            TBM_GET_ACTION_DESC(&mrMenuAdvPhy, index));
 
     return (true);
 }
