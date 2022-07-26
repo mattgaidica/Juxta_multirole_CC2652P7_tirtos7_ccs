@@ -11,8 +11,6 @@
 const ble         = scripting.addModule("/ti/ble5stack/ble");
 const CCFG        = scripting.addModule("/ti/devices/CCFG");
 const rfdesign    = scripting.addModule("/ti/devices/radioconfig/rfdesign");
-const Display     = scripting.addModule("/ti/display/Display");
-const Display1    = Display.addInstance();
 const AESCCM      = scripting.addModule("/ti/drivers/AESCCM");
 const AESCCM1     = AESCCM.addInstance();
 const AESCTRDRBG  = scripting.addModule("/ti/drivers/AESCTRDRBG");
@@ -32,6 +30,7 @@ const GPIO7       = GPIO.addInstance();
 const NVS         = scripting.addModule("/ti/drivers/NVS");
 const NVS1        = NVS.addInstance();
 const NVS2        = NVS.addInstance();
+const NVS3        = NVS.addInstance();
 const Power       = scripting.addModule("/ti/drivers/Power");
 const RF          = scripting.addModule("/ti/drivers/RF");
 const SPI         = scripting.addModule("/ti/drivers/SPI", {}, false);
@@ -82,19 +81,6 @@ CCFG.ccfgTemplate.$name       = "ti_devices_CCFG_CCFGCC26XXTemplate0";
 rfdesign.fbSub1g = "none";
 rfdesign.pa20    = "none";
 
-Display1.$name                                 = "CONFIG_Display_0";
-Display1.enableANSI                            = true;
-Display1.uartBufferSize                        = 128;
-Display1.useUART2                              = false;
-Display1.uart.$name                            = "CONFIG_DISPLAY_UART";
-Display1.uart.uart.$assign                     = "UART1";
-Display1.uart.uart.txPin.$assign               = "DIO_25";
-Display1.uart.uart.rxPin.$assign               = "DIO_24";
-Display1.uart.txPinInstance.initialOutputState = "High";
-Display1.uart.txPinInstance.$name              = "CONFIG_PIN_UART_TX";
-Display1.uart.txPinInstance.outputStrength     = "Low";
-Display1.uart.rxPinInstance.$name              = "CONFIG_PIN_UART_RX";
-
 AESCCM1.$name = "CONFIG_AESCCM0";
 
 AESCTRDRBG1.$name              = "CONFIG_AESCTRDRBG_0";
@@ -143,6 +129,10 @@ NVS2.$name                    = "NVS_JUXTA_DATA";
 NVS2.internalFlash.$name      = "ti_drivers_nvs_NVSCC26XX1";
 NVS2.internalFlash.regionBase = 0x10000;
 NVS2.internalFlash.regionSize = 0x4000;
+
+NVS3.$name                    = "NVS_JUXTA_CONFIG";
+NVS3.internalFlash.$name      = "ti_drivers_nvs_NVSCC26XX2";
+NVS3.internalFlash.regionBase = 0x14000;
 
 SPI1.$name                          = "CONFIG_SPI";
 SPI1.mode                           = "Four Pin SS Active Low";

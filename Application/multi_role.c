@@ -15,25 +15,13 @@
 #include <unistd.h>
 //#include <stdint.h>
 //#include <stddef.h>
-#include <string.h>
 #include <stdio.h>
 
-#ifdef FREERTOS
-#include <FreeRTOS.h>
-#include <task.h>
-//#include <pthread.h>
-#include <mqueue.h>
-#else
 #include <string.h>
 #include <ti/sysbios/knl/Clock.h>
 #include <ti/sysbios/knl/Event.h>
 #include <ti/sysbios/knl/Queue.h>
 #include <ti/sysbios/knl/Task.h>
-#endif
-
-#ifdef FREERTOS
-#include <stdarg.h>
-#endif
 
 #include <ti/display/Display.h>
 
@@ -41,7 +29,7 @@
 #include <intrinsics.h>
 #endif
 
-#include <ti/drivers/utils/List.h>
+//#include <ti/drivers/utils/List.h>
 #include <ti/drivers/GPIO.h>
 #include <ti/drivers/SPI.h>
 #include <ti/drivers/NVS.h>
@@ -57,12 +45,12 @@
 #include <simple_gatt_profile.h>
 
 #include <ti_drivers_config.h>
-#include <board_key.h>
+//#include <board_key.h>
 
-#include <menu/two_btn_menu.h>
+//#include <menu/two_btn_menu.h>
 
 #include "ti_ble_config.h"
-#include "multi_role_menu.h"
+//#include "multi_role_menu.h"
 #include "multi_role.h"
 
 /*********************************************************************
@@ -104,13 +92,16 @@
 #define JUXTA_PERIODIC_PERIOD           1000 // time keeper
 #define JUXTA_SNIFF_STARTUP_DELAY       5 // seconds
 
-// Juxta log
-#define JUXTA_LOG_SIZE              16 // bytes
+// Juxta NVS
+#define JUXTA_LOG_SIZE              18 // bytes
 #define JUXTA_LOG_OFFSET_HEADER     0 // 2 bytes
-#define JUXTA_LOG_OFFSET_SCANADDR   2 // 6 bytes
-#define JUXTA_LOG_OFFSET_RSSI       8 // 1 bytes
-#define JUXTA_LOG_OFFSET_TIME       9 // 4 bytes
-// 3 bytes left over
+#define JUXTA_LOG_OFFSET_LOGCOUNT   2 // 4 bytes
+#define JUXTA_LOG_OFFSET_SCANADDR   6 // 6 bytes
+#define JUXTA_LOG_OFFSET_RSSI       12 // 1 bytes
+#define JUXTA_LOG_OFFSET_TIME       13 // 4 bytes
+
+#define JUXTA_CONFIG_SIZE               1 // uint32_t
+#define JUXTA_CONFIG_OFFSET_LOGCOUNT    0
 
 // Internal Events for RTOS application
 #define MR_ICALL_EVT                         ICALL_MSG_EVENT_ID // Event_Id_31
@@ -195,6 +186,7 @@ typedef struct
 {
     uint8_t addrType;         // Peer Device's Address Type
     uint8_t addr[B_ADDR_LEN]; // Peer Device Address
+    int8_t rssi;
 } scanRec_t;
 
 // Container to store information from clock expiration using a flexible array
@@ -343,13 +335,12 @@ mrClockEventData_t argJuxtaMagnet = { .event = JUXTA_EVT_MAGNET_PERIODIC };
 mrClockEventData_t argJuxtaPeriodic = { .event = JUXTA_EVT_PERIODIC };
 
 static bool sniffAdv = true;
-static bool doDebug = true;
-static uint8_t scanCount = 0;
 
 NVS_Handle nvsHandle;
 NVS_Attrs regionAttrs;
 static uint32_t logCount = 0;
-static uint8_t nvsBuffer[JUXTA_LOG_SIZE];
+static uint8_t nvsDataBuffer[JUXTA_LOG_SIZE];
+static uint32_t nvsConfigBuffer[JUXTA_CONFIG_SIZE];
 static uint32_t localTime = 0;
 
 bool juxtaRadio = false;
@@ -377,7 +368,7 @@ static void multi_role_processAdvEvent(mrGapAdvEventData_t *pEventData);
 
 static void multi_role_charValueChangeCB(uint8_t paramID);
 static status_t multi_role_enqueueMsg(uint8_t event, void *pData);
-static void multi_role_handleKeys(uint8_t keys);
+//static void multi_role_handleKeys(uint8_t keys);
 static uint16_t multi_role_getConnIndex(uint16_t connHandle);
 //static void multi_role_keyChangeHandler(uint8_t keys);
 static uint8_t multi_role_addConnInfo(uint16_t connHandle, uint8_t *pAddr,
@@ -387,7 +378,8 @@ static void multi_role_clockHandler(UArg arg);
 
 static uint8_t multi_role_clearConnListEntry(uint16_t connHandle);
 #if (DEFAULT_DEV_DISC_BY_SVC_UUID == TRUE)
-static void multi_role_addScanInfo(uint8_t *pAddr, uint8_t addrType);
+static void multi_role_addScanInfo(uint8_t *pAddr, uint8_t addrType,
+                                   uint8_t rssi);
 static bool multi_role_findSvcUuid(uint16_t uuid, uint8_t *pData,
                                    uint16_t dataLen);
 #endif // DEFAULT_DEV_DISC_BY_SVC_UUID
@@ -430,6 +422,33 @@ static gapBondCBs_t multi_role_BondMgrCBs = { multi_role_passcodeCB, // Passcode
  * PUBLIC FUNCTIONS
  */
 
+static void recallNVS(void)
+{
+    nvsHandle = NVS_open(NVS_JUXTA_CONFIG, NULL);
+    if (nvsHandle != NULL)
+    {
+        NVS_read(nvsHandle, JUXTA_CONFIG_OFFSET_LOGCOUNT, (void*) &logCount,
+                 sizeof(logCount));
+        NVS_close(nvsHandle);
+    }
+}
+
+static void saveConfigs(void)
+{
+    nvsHandle = NVS_open(NVS_JUXTA_CONFIG, NULL);
+    if (nvsHandle != NULL)
+    {
+        NVS_getAttrs(nvsHandle, &regionAttrs);
+        NVS_erase(nvsHandle, 0, regionAttrs.sectorSize); // erase all each time
+        memcpy(nvsConfigBuffer + JUXTA_CONFIG_OFFSET_LOGCOUNT, &logCount,
+               sizeof(logCount));
+        NVS_write(nvsHandle, 0, (void*) nvsConfigBuffer,
+                  sizeof(nvsConfigBuffer),
+                  NVS_WRITE_POST_VERIFY);
+        NVS_close(nvsHandle);
+    }
+}
+
 static void logScan(void) // called after MR_EVT_ADV_REPORT -> multi_role_addScanInfo()
 {
     // see: scanList, numScanRes
@@ -438,7 +457,6 @@ static void logScan(void) // called after MR_EVT_ADV_REPORT -> multi_role_addSca
     if (numScanRes > 0)
     {
         nvsHandle = NVS_open(NVS_JUXTA_DATA, NULL);
-
         if (nvsHandle != NULL)
         {
             NVS_getAttrs(nvsHandle, &regionAttrs);
@@ -454,25 +472,33 @@ static void logScan(void) // called after MR_EVT_ADV_REPORT -> multi_role_addSca
                     }
 
                     // clear buffer
-                    memset(nvsBuffer, 0, JUXTA_LOG_SIZE * sizeof(nvsBuffer[0]));
+                    memset(nvsDataBuffer, 0,
+                    JUXTA_LOG_SIZE * sizeof(nvsDataBuffer[0]));
                     // load buffer
                     uint8_t uuid[ATT_BT_UUID_SIZE] = {
                             LO_UINT16(SIMPLEPROFILE_SERV_UUID), HI_UINT16(
                                     SIMPLEPROFILE_SERV_UUID) };
 
-                    memcpy(nvsBuffer + JUXTA_LOG_OFFSET_HEADER, uuid, 2);
-                    memcpy(nvsBuffer + JUXTA_LOG_OFFSET_SCANADDR,
-                           scanList[i].addr, 6);
-                    memcpy(nvsBuffer + JUXTA_LOG_OFFSET_RSSI, uuid, 2);
-                    memcpy(nvsBuffer + JUXTA_LOG_OFFSET_TIME, &localTime, 4);
+                    memcpy(nvsDataBuffer + JUXTA_LOG_OFFSET_HEADER, uuid,
+                           sizeof(uint16_t));
+                    memcpy(nvsDataBuffer + JUXTA_LOG_OFFSET_LOGCOUNT, &logCount,
+                           sizeof(logCount));
+                    memcpy(nvsDataBuffer + JUXTA_LOG_OFFSET_SCANADDR,
+                           scanList[i].addr, B_ADDR_LEN);
+                    memcpy(nvsDataBuffer + JUXTA_LOG_OFFSET_RSSI,
+                           &scanList[i].rssi, 1);
 
-                    NVS_write(nvsHandle, 0, (void*) nvsBuffer,
-                              sizeof(nvsBuffer),
+                    memcpy(nvsDataBuffer + JUXTA_LOG_OFFSET_TIME, &localTime,
+                           sizeof(localTime));
+
+                    NVS_write(nvsHandle, offset, (void*) nvsDataBuffer,
+                              sizeof(nvsDataBuffer),
                               NVS_WRITE_POST_VERIFY);
-                    NVS_close(nvsHandle);
                     logCount++;
                 }
             }
+            NVS_close(nvsHandle);
+            saveConfigs();
         }
     }
 }
@@ -573,19 +599,25 @@ void multi_role_createTask(void)
  */
 static void multi_role_init(void)
 {
+    GPIO_init();
     GPIO_write(LED_0, 1);
 
-    // swap BLE address to include MAC address (unique for each device)
+    // swap address to include BLE MAC address (unique for each device)
     uint64_t bleAddress = *((uint64_t*) (FCFG1_BASE + FCFG1_O_MAC_BLE_0))
             & 0xFFFFFFFFFFFF;
     char newAddress[GAP_DEVICE_NAME_LEN] = ""; // +1 for null
-    sprintf(newAddress, "JX_%llu", bleAddress); // use <4 chars as prepend
+    sprintf(newAddress, "JX_%llX", bleAddress); // use <4 chars as prepend
     memcpy(attDeviceName, newAddress, GAP_DEVICE_NAME_LEN);
 
-    GPIO_init();
-    SPI_init();
     NVS_init();
+    recallNVS();
+    // !! until there is a real reset?
+    if (logCount > 10000) {
+        logCount = 0;
+        saveConfigs();
+    }
 
+    SPI_init();
     spiHandle = MC3635_init(CONFIG_SPI);
     if (spiHandle == NULL)
     {
@@ -595,7 +627,7 @@ static void multi_role_init(void)
     {
         blink(0); // error
     }
-    resetSniff();
+    resetSniff(); // must do for first detection
 
     BLE_LOG_INT_TIME(0, BLE_LOG_MODULE_APP, "APP : ---- init ", MR_TASK_PRIORITY);
     // MGRM Create the menu
@@ -741,8 +773,6 @@ static void multi_role_init(void)
     //Initialize GAP layer for Peripheral and Central role and register to receive GAP events
     GAP_DeviceInit(GAP_PROFILE_PERIPHERAL | GAP_PROFILE_CENTRAL, selfEntity,
                    addrMode, &pRandomAddress);
-
-//    GPIO_enableInt(MAGNET);
 
     GPIO_write(LED_0, 0);
     GPIO_write(LED_1, 0);
@@ -1006,9 +1036,9 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
 
 // Enable "Discover Devices", "Set Scanning PHY", and "Set Address Type"
 // in the main menu
-        tbm_setItemStatus(&mrMenuMain,
-        MR_ITEM_STARTDISC | MR_ITEM_ADVERTISE | MR_ITEM_PHY,
-                          MR_ITEM_NONE);
+//        tbm_setItemStatus(&mrMenuMain,
+//        MR_ITEM_STARTDISC | MR_ITEM_ADVERTISE | MR_ITEM_PHY,
+//                          MR_ITEM_NONE);
 
 //Display initialized state status
         Display_printf(dispHandle, MR_ROW_NUM_CONN, 0, "Num Conns: %d",
@@ -1020,21 +1050,21 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
 
     case GAP_CONNECTING_CANCELLED_EVENT:
     {
-        uint16_t itemsToEnable = MR_ITEM_STARTDISC | MR_ITEM_ADVERTISE
-                | MR_ITEM_PHY;
+//        uint16_t itemsToEnable = MR_ITEM_STARTDISC | MR_ITEM_ADVERTISE
+//                | MR_ITEM_PHY;
 
-        if (numConn > 0)
-        {
-            itemsToEnable |= MR_ITEM_SELECTCONN;
-        }
+//        if (numConn > 0)
+//        {
+//            itemsToEnable |= MR_ITEM_SELECTCONN;
+//        }
 
         Display_printf(dispHandle, MR_ROW_NON_CONN, 0,
                 "Conneting attempt cancelled");
 
 // Enable "Discover Devices", "Connect To", and "Set Scanning PHY"
 // and disable everything else.
-        tbm_setItemStatus(&mrMenuMain, itemsToEnable,
-        MR_ITEM_ALL & ~itemsToEnable);
+//        tbm_setItemStatus(&mrMenuMain, itemsToEnable,
+//        MR_ITEM_ALL & ~itemsToEnable);
 
         break;
     }
@@ -1045,10 +1075,10 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
         uint8_t role = ((gapEstLinkReqEvent_t*) pMsg)->connRole;
         uint8_t *pAddr = ((gapEstLinkReqEvent_t*) pMsg)->devAddr;
         uint8_t connIndex;
-        uint32_t itemsToDisable = MR_ITEM_STOPDISC | MR_ITEM_CANCELCONN;
+//        uint32_t itemsToDisable = MR_ITEM_STOPDISC | MR_ITEM_CANCELCONN;
         uint8_t *pStrAddr;
-        uint8_t i;
-        uint8_t numConnectable = 0;
+//        uint8_t i;
+//        uint8_t numConnectable = 0;
 
         BLE_LOG_INT_TIME(0, BLE_LOG_MODULE_APP, "APP : ---- got GAP_LINK_ESTABLISHED_EVENT", 0);
 // Add this connection info to the list
@@ -1068,33 +1098,33 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
                 numConn);
 
 // Disable "Connect To" until another discovery is performed
-        itemsToDisable |= MR_ITEM_CONNECT;
+//        itemsToDisable |= MR_ITEM_CONNECT;
 
 // If we already have maximum allowed number of connections,
 // disable device discovery and additional connection making.
-        if (numConn >= MAX_NUM_BLE_CONNS)
-        {
-            itemsToDisable |= MR_ITEM_STARTDISC;
-        }
-
-        for (i = 0; i < TBM_GET_NUM_ITEM(&mrMenuConnect); i++)
-        {
-            if (!memcmp(TBM_GET_ACTION_DESC(&mrMenuConnect, i), pStrAddr,
-            MR_ADDR_STR_SIZE))
-            {
-                // Disable this device from the connection choices
-                tbm_setItemStatus(&mrMenuConnect, MR_ITEM_NONE, 1 << i);
-            }
-            else if (TBM_IS_ITEM_ACTIVE(&mrMenuConnect, i))
-            {
-                numConnectable++;
-            }
-        }
+//        if (numConn >= MAX_NUM_BLE_CONNS)
+//        {
+//            itemsToDisable |= MR_ITEM_STARTDISC;
+//        }
+//
+//        for (i = 0; i < TBM_GET_NUM_ITEM(&mrMenuConnect); i++)
+//        {
+//            if (!memcmp(TBM_GET_ACTION_DESC(&mrMenuConnect, i), pStrAddr,
+//            MR_ADDR_STR_SIZE))
+//            {
+//                // Disable this device from the connection choices
+//                tbm_setItemStatus(&mrMenuConnect, MR_ITEM_NONE, 1 << i);
+//            }
+//            else if (TBM_IS_ITEM_ACTIVE(&mrMenuConnect, i))
+//            {
+//                numConnectable++;
+//            }
+//        }
 
 // Enable/disable Main menu items properly
-        tbm_setItemStatus(&mrMenuMain,
-        MR_ITEM_ALL & ~(itemsToDisable),
-                          itemsToDisable);
+//        tbm_setItemStatus(&mrMenuMain,
+//        MR_ITEM_ALL & ~(itemsToDisable),
+//                          itemsToDisable);
 
 // Matt: this will always disable because MAX_NUM_BLE_CONNS = 1
         if (numConn < MAX_NUM_BLE_CONNS)
@@ -1116,11 +1146,11 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
         uint16_t connHandle =
                 ((gapTerminateLinkEvent_t*) pMsg)->connectionHandle;
         uint8_t connIndex;
-        uint32_t itemsToEnable = MR_ITEM_STARTDISC | MR_ITEM_ADVERTISE
-                | MR_ITEM_PHY;
+//        uint32_t itemsToEnable = MR_ITEM_STARTDISC | MR_ITEM_ADVERTISE
+//                | MR_ITEM_PHY;
         uint8_t *pStrAddr;
-        uint8_t i;
-        uint8_t numConnectable = 0;
+//        uint8_t i;
+//        uint8_t numConnectable = 0;
 
         BLE_LOG_INT_STR(0, BLE_LOG_MODULE_APP, "APP : GAP msg: status=%d, opcode=%s\n", 0, "GAP_LINK_TERMINATED_EVENT");
 // Mark this connection deleted in the connected device list.
@@ -1135,20 +1165,20 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
                 pStrAddr);Display_printf(dispHandle, MR_ROW_NUM_CONN, 0, "Num Conns: %d",
                 numConn);
 
-        for (i = 0; i < TBM_GET_NUM_ITEM(&mrMenuConnect); i++)
-        {
-            if (!memcmp(TBM_GET_ACTION_DESC(&mrMenuConnect, i), pStrAddr,
-            MR_ADDR_STR_SIZE))
-            {
-                // Enable this device in the connection choices
-                tbm_setItemStatus(&mrMenuConnect, 1 << i, MR_ITEM_NONE);
-            }
-
-            if (TBM_IS_ITEM_ACTIVE(&mrMenuConnect, i))
-            {
-                numConnectable++;
-            }
-        }
+//        for (i = 0; i < TBM_GET_NUM_ITEM(&mrMenuConnect); i++)
+//        {
+//            if (!memcmp(TBM_GET_ACTION_DESC(&mrMenuConnect, i), pStrAddr,
+//            MR_ADDR_STR_SIZE))
+//            {
+//                // Enable this device in the connection choices
+//                tbm_setItemStatus(&mrMenuConnect, 1 << i, MR_ITEM_NONE);
+//            }
+//
+//            if (TBM_IS_ITEM_ACTIVE(&mrMenuConnect, i))
+//            {
+//                numConnectable++;
+//            }
+//        }
 
 // Start advertising since there is room for more connections
 // Matt: unless sniffAdv mode = true
@@ -1157,36 +1187,36 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
             GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
         }
 
-        if (numConn > 0)
-        {
-            // There still is an active connection to select
-            itemsToEnable |= MR_ITEM_SELECTCONN;
-        }
+//        if (numConn > 0)
+//        {
+//            // There still is an active connection to select
+//            itemsToEnable |= MR_ITEM_SELECTCONN;
+//        }
 
 // If no active connections
         if (numConn == 0)
         {
             // Stop periodic clock
             Util_stopClock(&clkPeriodic);
-            tbm_setItemStatus(&mrMenuMain, TBM_ITEM_NONE, TBM_ITEM_ALL);
-            tbm_setItemStatus(
-                    &mrMenuMain,
-                    MR_ITEM_NONE,
-                    MR_ITEM_ALL
-                            ^ (MR_ITEM_STARTDISC | MR_ITEM_ADVERTISE
-                                    | MR_ITEM_PHY));
+//            tbm_setItemStatus(&mrMenuMain, TBM_ITEM_NONE, TBM_ITEM_ALL);
+//            tbm_setItemStatus(
+//                    &mrMenuMain,
+//                    MR_ITEM_NONE,
+//                    MR_ITEM_ALL
+//                            ^ (MR_ITEM_STARTDISC | MR_ITEM_ADVERTISE
+//                                    | MR_ITEM_PHY));
         }
 
 // Enable/disable items properly.
-        tbm_setItemStatus(&mrMenuMain, itemsToEnable,
-        MR_ITEM_ALL & ~itemsToEnable);
+//        tbm_setItemStatus(&mrMenuMain, itemsToEnable,
+//        MR_ITEM_ALL & ~itemsToEnable);
 
 // If we are in the context which the teminated connection was associated
 // with, go to main menu.
-        if (connHandle == mrConnHandle)
-        {
-            tbm_goTo(&mrMenuMain);
-        }
+//        if (connHandle == mrConnHandle)
+//        {
+//            tbm_goTo(&mrMenuMain);
+//        }
 
         break;
     }
@@ -1484,7 +1514,7 @@ static uint8_t multi_role_processGATTMsg(gattMsgEvent_t *pMsg)
                         charVal);
             }
 
-            tbm_goTo(&mrMenuPerConn);
+//            tbm_goTo(&mrMenuPerConn);
         }
         else if (connList[connIndex].discState != BLE_DISC_STATE_IDLE)
         {
@@ -1585,11 +1615,11 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
         break;
     }
 
-    case MR_EVT_KEY_CHANGE:
-    {
-        multi_role_handleKeys(*(uint8_t*) (pMsg->pData));
-        break;
-    }
+//    case MR_EVT_KEY_CHANGE:
+//    {
+//        multi_role_handleKeys(*(uint8_t*) (pMsg->pData));
+//        break;
+//    }
 
     case MR_EVT_ADV_REPORT:
     {
@@ -1599,7 +1629,8 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
         if (multi_role_findSvcUuid(SIMPLEPROFILE_SERV_UUID, pAdvRpt->pData,
                                    pAdvRpt->dataLen))
         {
-            multi_role_addScanInfo(pAdvRpt->addr, pAdvRpt->addrType);
+            multi_role_addScanInfo(pAdvRpt->addr, pAdvRpt->addrType,
+                                   pAdvRpt->rssi);
             Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "Discovered: %s",
                     Util_convertBdAddr2Str(pAdvRpt->addr));
         }
@@ -1619,8 +1650,8 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
     case MR_EVT_SCAN_ENABLED:
     {
 // Disable everything but "Stop Discovering" on the menu
-        tbm_setItemStatus(&mrMenuMain, MR_ITEM_STOPDISC,
-                          (MR_ITEM_ALL & ~MR_ITEM_STOPDISC));
+//        tbm_setItemStatus(&mrMenuMain, MR_ITEM_STOPDISC,
+//                          (MR_ITEM_ALL & ~MR_ITEM_STOPDISC));
         Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Discovering...");
 
         break;
@@ -1632,8 +1663,8 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
         uint8_t i;
         static uint8_t *pAddrs = NULL;
         uint8_t *pAddrTemp;
-        uint16_t itemsToEnable = MR_ITEM_STARTDISC | MR_ITEM_ADVERTISE
-                | MR_ITEM_PHY;
+//        uint16_t itemsToEnable = MR_ITEM_STARTDISC | MR_ITEM_ADVERTISE
+//                | MR_ITEM_PHY;
 #if (DEFAULT_DEV_DISC_BY_SVC_UUID == TRUE)
         numReport = numScanRes;
 #else // !DEFAULT_DEV_DISC_BY_SVC_UUID
@@ -1642,27 +1673,25 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
         numReport = ((GapScan_Evt_End_t*) (pMsg->pData))->numReport;
 #endif // DEFAULT_DEV_DISC_BY_SVC_UUID
 
-        logScan();
-
         Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "%d devices discovered",
                 numReport);
 
-        if (numReport > 0)
-        {
-            // Also enable "Connect to"
-            itemsToEnable |= MR_ITEM_CONNECT;
-        }
-
-        if (numConn > 0)
-        {
-            // Also enable "Work with"
-            itemsToEnable |= MR_ITEM_SELECTCONN;
-        }
+//        if (numReport > 0)
+//        {
+//            // Also enable "Connect to"
+//            itemsToEnable |= MR_ITEM_CONNECT;
+//        }
+//
+//        if (numConn > 0)
+//        {
+//            // Also enable "Work with"
+//            itemsToEnable |= MR_ITEM_SELECTCONN;
+//        }
 
 // Enable "Discover Devices", "Set Scanning PHY", and possibly
 // "Connect to" and/or "Work with".
 // Disable "Stop Discovering".
-        tbm_setItemStatus(&mrMenuMain, itemsToEnable, MR_ITEM_STOPDISC);
+//        tbm_setItemStatus(&mrMenuMain, itemsToEnable, MR_ITEM_STOPDISC);
         if (pAddrs != NULL)
         {
             ICall_free(pAddrs);
@@ -1674,7 +1703,7 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
             numReport = 0;
         }
 
-        TBM_SET_NUM_ITEM(&mrMenuConnect, numReport);
+//        TBM_SET_NUM_ITEM(&mrMenuConnect, numReport);
 
         if (pAddrs != NULL)
         {
@@ -1695,15 +1724,15 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
 #endif // DEFAULT_DEV_DISC_BY_SVC_UUID
 
                 // Assign the string to the corresponding action description of the menu
-                TBM_SET_ACTION_DESC(&mrMenuConnect, i, pAddrTemp);
-                tbm_setItemStatus(&mrMenuConnect, (1 << i), TBM_ITEM_NONE);
+//                TBM_SET_ACTION_DESC(&mrMenuConnect, i, pAddrTemp);
+//                tbm_setItemStatus(&mrMenuConnect, (1 << i), TBM_ITEM_NONE);
             }
 
             // Disable any non-active scan results
-            for (; i < DEFAULT_MAX_SCAN_RES; i++)
-            {
-                tbm_setItemStatus(&mrMenuConnect, TBM_ITEM_NONE, (1 << i));
-            }
+//            for (; i < DEFAULT_MAX_SCAN_RES; i++)
+//            {
+//                tbm_setItemStatus(&mrMenuConnect, TBM_ITEM_NONE, (1 << i));
+//            }
         }
         break;
     }
@@ -1837,6 +1866,7 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
     {
         if (juxtaRadio)
         {
+            GPIO_toggle(LED_1); // debug
             if (juxtaRadioCount == 0) // advertise segment
             {
                 if (mrIsAdvertising == false)
@@ -1858,57 +1888,60 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
                 }
                 multi_role_doDiscoverDevices(0); // resets numScanRes
             }
-            else if (juxtaRadioCount > JUXTA_SCAN_N_TIMES)
+            if (juxtaRadioCount > JUXTA_SCAN_N_TIMES)
             {
-                GapScan_disable(); // kicks-off log
+                GapScan_disable();
+                logScan();
                 juxtaRadioCount = 0;
                 juxtaRadio = false;
                 GPIO_write(LED_0, 0);
                 GPIO_write(LED_1, 0);
             }
-
-            juxtaRadioCount++;
-            GPIO_toggle(LED_1);
-            return;
-        }
-
-        if (GPIO_read(MAGNET) == 0) // active
-        {
-            GapScan_disable();
-            GPIO_toggle(LED_0);
-            if (mrIsAdvertising == false)
+            else
             {
-                // Turn on advertising
-                GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
-                mrIsAdvertising = true;
+                juxtaRadioCount++;
             }
         }
         else
         {
-            GPIO_write(LED_0, 0);
-            if (mrIsAdvertising == true)
+            if (GPIO_read(MAGNET) == 0) // active
             {
-                // Turn off advertising
-                GapAdv_disable(advHandle);
-                mrIsAdvertising = false;
+                GapScan_disable();
+                GPIO_toggle(LED_0);
+                if (mrIsAdvertising == false)
+                {
+                    // Turn on advertising
+                    GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+                    mrIsAdvertising = true;
+                }
+            }
+            else
+            {
+                GPIO_write(LED_0, 0);
+                if (mrIsAdvertising == true)
+                {
+                    // Turn off advertising
+                    GapAdv_disable(advHandle);
+                    mrIsAdvertising = false;
+                }
+
+                if (localTime > JUXTA_SNIFF_STARTUP_DELAY) // sniff ready
+                {
+                    if (GPIO_read(AXY_INT) == 0) // active
+                    {
+                        resetSniff(); // resets internal interrupt
+                        juxtaRadio = true;
+                    }
+
+                }
             }
 
-            if (localTime > JUXTA_SNIFF_STARTUP_DELAY) // sniff ready
+            if (localTime < JUXTA_SNIFF_STARTUP_DELAY) // sniff not ready, not sure why this is
             {
                 if (GPIO_read(AXY_INT) == 0) // active
                 {
                     resetSniff(); // resets internal interrupt
-                    juxtaRadio = true;
                 }
-
-            }
-        }
-
-        if (localTime < JUXTA_SNIFF_STARTUP_DELAY) // sniff not ready, not sure why this is
-        {
-            if (GPIO_read(AXY_INT) == 0) // active
-            {
-                resetSniff(); // resets internal interrupt
             }
         }
         break;
@@ -2066,7 +2099,8 @@ static bool multi_role_findSvcUuid(uint16_t uuid, uint8_t *pData,
  *
  * @return  none
  */
-static void multi_role_addScanInfo(uint8_t *pAddr, uint8_t addrType)
+static void multi_role_addScanInfo(uint8_t *pAddr, uint8_t addrType,
+                                   uint8_t rssi)
 {
     uint8_t i;
 
@@ -2085,6 +2119,7 @@ static void multi_role_addScanInfo(uint8_t *pAddr, uint8_t addrType)
 // Add addr to scan result list
         memcpy(scanList[numScanRes].addr, pAddr, B_ADDR_LEN);
         scanList[numScanRes].addrType = addrType;
+        scanList[numScanRes].rssi = rssi;
 
 // Increment scan result count
         numScanRes++;
@@ -2379,38 +2414,37 @@ static void multi_role_clockHandler(UArg arg)
  *
  * @return  none
  */
-static void multi_role_handleKeys(uint8_t keys)
-{
-#ifndef FREERTOS
-    uint32_t rtnVal = 0;
-#endif
-    if (keys & KEY_LEFT)
-    {
-#ifndef FREERTOS
-// Check if the key is still pressed
-        if (PIN_getInputValue(CONFIG_GPIO_BTN1) == 0)
-        {
-#endif
-            tbm_buttonLeft();
-#ifndef FREERTOS
-        }
-#endif
-    }
-    else if (keys & KEY_RIGHT)
-    {
-// Check if the key is still pressed
-#ifndef FREERTOS
-        rtnVal = PIN_getInputValue(CONFIG_GPIO_BTN2);
-        if (rtnVal == 0)
-        {
-#endif
-            tbm_buttonRight();
-#ifndef FREERTOS
-        }
-#endif
-    }
-}
-
+//static void multi_role_handleKeys(uint8_t keys)
+//{
+//#ifndef FREERTOS
+//    uint32_t rtnVal = 0;
+//#endif
+//    if (keys & KEY_LEFT)
+//    {
+//#ifndef FREERTOS
+//// Check if the key is still pressed
+//        if (PIN_getInputValue(CONFIG_GPIO_BTN1) == 0)
+//        {
+//#endif
+//            tbm_buttonLeft();
+//#ifndef FREERTOS
+//        }
+//#endif
+//    }
+//    else if (keys & KEY_RIGHT)
+//    {
+//// Check if the key is still pressed
+//#ifndef FREERTOS
+//        rtnVal = PIN_getInputValue(CONFIG_GPIO_BTN2);
+//        if (rtnVal == 0)
+//        {
+//#endif
+//            tbm_buttonRight();
+//#ifndef FREERTOS
+//        }
+//#endif
+//    }
+//}
 /*********************************************************************
  * @fn      multi_role_processGATTDiscEvent
  *
@@ -2494,9 +2528,9 @@ static void multi_role_processGATTDiscEvent(gattMsgEvent_t *pMsg)
             Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "Simple Svc Found");
 
             // Now we can use GATT Read/Write
-            tbm_setItemStatus(&mrMenuPerConn,
-            MR_ITEM_GATTREAD | MR_ITEM_GATTWRITE,
-                              MR_ITEM_NONE);
+//            tbm_setItemStatus(&mrMenuPerConn,
+//            MR_ITEM_GATTREAD | MR_ITEM_GATTWRITE,
+//                              MR_ITEM_NONE);
         }
 
         connList[connIndex].discState = BLE_DISC_STATE_IDLE;
@@ -2974,8 +3008,8 @@ bool multi_role_doDiscoverDevices(uint8_t index)
     GapScan_enable(0, DEFAULT_SCAN_DURATION, DEFAULT_MAX_SCAN_RES);
 #endif // DEFAULT_DEV_DISC_BY_SVC_UUID
 // Enable only "Stop Discovering" and disable all others in the main menu
-    tbm_setItemStatus(&mrMenuMain, MR_ITEM_STOPDISC,
-                      (MR_ITEM_ALL & ~MR_ITEM_STOPDISC));
+//    tbm_setItemStatus(&mrMenuMain, MR_ITEM_STOPDISC,
+//                      (MR_ITEM_ALL & ~MR_ITEM_STOPDISC));
 
     return (true);
 }
@@ -3055,12 +3089,12 @@ bool multi_role_doConnect(uint8_t index)
         GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
 
 // Enable only "Cancel Connecting" and disable all others in the main menu
-        tbm_setItemStatus(&mrMenuMain, MR_ITEM_CANCELCONN,
-                          (MR_ITEM_ALL & ~MR_ITEM_CANCELCONN));
+//        tbm_setItemStatus(&mrMenuMain, MR_ITEM_CANCELCONN,
+//                          (MR_ITEM_ALL & ~MR_ITEM_CANCELCONN));
 
         Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Connecting...");
 
-        tbm_goTo(&mrMenuMain);
+//        tbm_goTo(&mrMenuMain);
     }
 
     return (true);
@@ -3077,7 +3111,7 @@ bool multi_role_doConnect(uint8_t index)
  */
 bool multi_role_doSelectConn(uint8_t index)
 {
-    uint32_t itemsToDisable = MR_ITEM_NONE;
+//    uint32_t itemsToDisable = MR_ITEM_NONE;
 
 // index cannot be equal to or greater than MAX_NUM_BLE_CONNS
     MULTIROLE_ASSERT(index < MAX_NUM_BLE_CONNS);
@@ -3090,19 +3124,19 @@ bool multi_role_doSelectConn(uint8_t index)
         multi_role_enqueueMsg(MR_EVT_SVC_DISC, NULL);
 
 // Diable GATT Read/Write until simple service is found
-        itemsToDisable = MR_ITEM_GATTREAD | MR_ITEM_GATTWRITE;
+//        itemsToDisable = MR_ITEM_GATTREAD | MR_ITEM_GATTWRITE;
     }
 
 // Set the menu title and go to this connection's context
-    TBM_SET_TITLE(&mrMenuPerConn,
-                  TBM_GET_ACTION_DESC(&mrMenuSelectConn, index));
+//    TBM_SET_TITLE(&mrMenuPerConn,
+//                  TBM_GET_ACTION_DESC(&mrMenuSelectConn, index));
 
-    tbm_setItemStatus(&mrMenuPerConn, MR_ITEM_NONE, itemsToDisable);
+//    tbm_setItemStatus(&mrMenuPerConn, MR_ITEM_NONE, itemsToDisable);
 
 // Clear non-connection-related message
     Display_clearLine(dispHandle, MR_ROW_NON_CONN);
 
-    tbm_goTo(&mrMenuPerConn);
+//    tbm_goTo(&mrMenuPerConn);
 
     return (true);
 }
@@ -3230,22 +3264,21 @@ bool multi_role_doConnUpdate(uint8_t index)
  *
  * @return  always true
  */
-bool multi_role_doConnPhy(uint8_t index)
-{
-// Set Phy Preference on the current connection. Apply the same value
-// for RX and TX. For more information, see the LE 2M PHY section in the User's Guide:
-// http://software-dl.ti.com/lprf/ble5stack-latest/
-// Note PHYs are already enabled by default in build_config.opt in stack project.
-    HCI_LE_SetPhyCmd(mrConnHandle, 0, MRMenu_connPhy[index].value,
-                     MRMenu_connPhy[index].value, 0);
-
-    Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
-            "Connection PHY preference: %s",
-            TBM_GET_ACTION_DESC(&mrMenuConnPhy, index));
-
-    return (true);
-}
-
+//bool multi_role_doConnPhy(uint8_t index)
+//{
+//// Set Phy Preference on the current connection. Apply the same value
+//// for RX and TX. For more information, see the LE 2M PHY section in the User's Guide:
+//// http://software-dl.ti.com/lprf/ble5stack-latest/
+//// Note PHYs are already enabled by default in build_config.opt in stack project.
+//    HCI_LE_SetPhyCmd(mrConnHandle, 0, MRMenu_connPhy[index].value,
+//                     MRMenu_connPhy[index].value, 0);
+//
+//    Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
+//            "Connection PHY preference: %s",
+//            TBM_GET_ACTION_DESC(&mrMenuConnPhy, index));
+//
+//    return (true);
+//}
 /*********************************************************************
  * @fn      multi_role_doSetInitPhy
  *
@@ -3255,16 +3288,15 @@ bool multi_role_doConnPhy(uint8_t index)
  *
  * @return  always true
  */
-bool multi_role_doSetInitPhy(uint8_t index)
-{
-    mrInitPhy = MRMenu_initPhy[index].value;
-    Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
-            "Initialize PHY preference: %s",
-            TBM_GET_ACTION_DESC(&mrMenuInitPhy, index));
-
-    return (true);
-}
-
+//bool multi_role_doSetInitPhy(uint8_t index)
+//{
+//    mrInitPhy = MRMenu_initPhy[index].value;
+//    Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
+//            "Initialize PHY preference: %s",
+//            TBM_GET_ACTION_DESC(&mrMenuInitPhy, index));
+//
+//    return (true);
+//}
 /*********************************************************************
  * @fn      multi_role_doSetScanPhy
  *
@@ -3274,17 +3306,16 @@ bool multi_role_doSetInitPhy(uint8_t index)
  *
  * @return  always true
  */
-bool multi_role_doSetScanPhy(uint8_t index)
-{
-// Set scanning primary PHY
-    GapScan_setParam(SCAN_PARAM_PRIM_PHYS, &MRMenu_scanPhy[index].value);
-
-    Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Primary Scan PHY: %s",
-            TBM_GET_ACTION_DESC(&mrMenuScanPhy, index));
-
-    return (true);
-}
-
+//bool multi_role_doSetScanPhy(uint8_t index)
+//{
+//// Set scanning primary PHY
+//    GapScan_setParam(SCAN_PARAM_PRIM_PHYS, &MRMenu_scanPhy[index].value);
+//
+//    Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Primary Scan PHY: %s",
+//            TBM_GET_ACTION_DESC(&mrMenuScanPhy, index));
+//
+//    return (true);
+//}
 /*********************************************************************
  * @fn      multi_role_doSetAdvPhy
  *
@@ -3295,51 +3326,50 @@ bool multi_role_doSetScanPhy(uint8_t index)
  * @return  always true
  * !! Matt, rm
  */
-bool multi_role_doSetAdvPhy(uint8_t index)
-{
-    uint16_t props;
-    GapAdv_primaryPHY_t phy;
-    bool isAdvActive = mrIsAdvertising;
-
-    switch (MRMenu_advPhy[index].value)
-    {
-    case MR_ADV_LEGACY_PHY_1_MBPS:
-        props = GAP_ADV_PROP_CONNECTABLE | GAP_ADV_PROP_SCANNABLE
-                | GAP_ADV_PROP_LEGACY;
-        phy = GAP_ADV_PRIM_PHY_1_MBPS;
-        break;
-    case MR_ADV_EXT_PHY_1_MBPS:
-        props = GAP_ADV_PROP_CONNECTABLE;
-        phy = GAP_ADV_PRIM_PHY_1_MBPS;
-        break;
-    case MR_ADV_EXT_PHY_CODED:
-        props = GAP_ADV_PROP_CONNECTABLE;
-        phy = GAP_ADV_PRIM_PHY_CODED_S2;
-        break;
-    default:
-        return (false);
-    }
-    if (isAdvActive)
-    {
-// Turn off advertising
-        GapAdv_disable(advHandle);
-    }
-    GapAdv_setParam(advHandle, GAP_ADV_PARAM_PROPS, &props);
-    GapAdv_setParam(advHandle, GAP_ADV_PARAM_PRIMARY_PHY, &phy);
-    GapAdv_setParam(advHandle, GAP_ADV_PARAM_SECONDARY_PHY, &phy);
-    if (isAdvActive)
-    {
-// Turn on advertising
-        GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
-    }
-
-    Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
-            "Advertise PHY preference: %s",
-            TBM_GET_ACTION_DESC(&mrMenuAdvPhy, index));
-
-    return (true);
-}
-
+//bool multi_role_doSetAdvPhy(uint8_t index)
+//{
+//    uint16_t props;
+//    GapAdv_primaryPHY_t phy;
+//    bool isAdvActive = mrIsAdvertising;
+//
+//    switch (MRMenu_advPhy[index].value)
+//    {
+//    case MR_ADV_LEGACY_PHY_1_MBPS:
+//        props = GAP_ADV_PROP_CONNECTABLE | GAP_ADV_PROP_SCANNABLE
+//                | GAP_ADV_PROP_LEGACY;
+//        phy = GAP_ADV_PRIM_PHY_1_MBPS;
+//        break;
+//    case MR_ADV_EXT_PHY_1_MBPS:
+//        props = GAP_ADV_PROP_CONNECTABLE;
+//        phy = GAP_ADV_PRIM_PHY_1_MBPS;
+//        break;
+//    case MR_ADV_EXT_PHY_CODED:
+//        props = GAP_ADV_PROP_CONNECTABLE;
+//        phy = GAP_ADV_PRIM_PHY_CODED_S2;
+//        break;
+//    default:
+//        return (false);
+//    }
+//    if (isAdvActive)
+//    {
+//// Turn off advertising
+//        GapAdv_disable(advHandle);
+//    }
+//    GapAdv_setParam(advHandle, GAP_ADV_PARAM_PROPS, &props);
+//    GapAdv_setParam(advHandle, GAP_ADV_PARAM_PRIMARY_PHY, &phy);
+//    GapAdv_setParam(advHandle, GAP_ADV_PARAM_SECONDARY_PHY, &phy);
+//    if (isAdvActive)
+//    {
+//// Turn on advertising
+//        GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+//    }
+//
+//    Display_printf(dispHandle, MR_ROW_CUR_CONN, 0,
+//            "Advertise PHY preference: %s",
+//            TBM_GET_ACTION_DESC(&mrMenuAdvPhy, index));
+//
+//    return (true);
+//}
 /*********************************************************************
  * @fn      multi_role_doDisconnect
  *
