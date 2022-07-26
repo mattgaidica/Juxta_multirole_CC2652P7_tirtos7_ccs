@@ -33,6 +33,7 @@
 #include <ti/drivers/GPIO.h>
 #include <ti/drivers/SPI.h>
 #include <ti/drivers/NVS.h>
+#include <ti/drivers/UART.h>
 #include <MC3635.h>
 
 #include <icall.h>
@@ -42,7 +43,7 @@
 #include <icall_ble_api.h>
 
 #include <devinfoservice.h>
-#include <simple_gatt_profile.h>
+#include <JuxtaProfiles/juxta_gatt_profile.h>
 
 #include <ti_drivers_config.h>
 //#include <board_key.h>
@@ -93,7 +94,7 @@
 #define JUXTA_SNIFF_STARTUP_DELAY       5 // seconds
 
 // Juxta NVS
-#define JUXTA_LOG_SIZE              18 // bytes
+#define JUXTA_LOG_SIZE              17 // bytes
 #define JUXTA_LOG_OFFSET_HEADER     0 // 2 bytes
 #define JUXTA_LOG_OFFSET_LOGCOUNT   2 // 4 bytes
 #define JUXTA_LOG_OFFSET_SCANADDR   6 // 6 bytes
@@ -346,6 +347,8 @@ static uint32_t localTime = 0;
 bool juxtaRadio = false;
 uint8_t juxtaRadioCount = 0;
 
+UART_Handle uart = NULL;
+
 /*********************************************************************
  * LOCAL FUNCTIONS
  */
@@ -422,6 +425,62 @@ static gapBondCBs_t multi_role_BondMgrCBs = { multi_role_passcodeCB, // Passcode
  * PUBLIC FUNCTIONS
  */
 
+static void dumpLog()
+{
+    UART_init();
+
+    uint32_t i, offset;
+    uint32_t logPos = 0;
+    uint8_t headerByte = 0x99;
+
+    UART_Params uartParams;
+    UART_Params_init(&uartParams);
+    uartParams.baudRate = 115200;
+    uart = UART_open(JUXTA_UART, &uartParams); // UART_close(uart);
+    nvsHandle = NVS_open(NVS_JUXTA_DATA, NULL);
+
+    if (uart != NULL && nvsHandle != NULL)
+    {
+        // header, should send address
+        for (i = 0; i < 10; i++)
+        {
+            UART_write(uart, &headerByte, sizeof(uint8_t));
+            GPIO_toggle(LED_1);
+        }
+        UART_write(uart, attDeviceName, sizeof(attDeviceName));
+        GPIO_toggle(LED_1);
+
+        while (logPos < logCount)
+        {
+            offset = logPos * JUXTA_LOG_SIZE;
+            NVS_read(nvsHandle, offset, (void*) nvsDataBuffer,
+                            sizeof(nvsDataBuffer));
+            UART_write(uart, nvsDataBuffer, sizeof(nvsDataBuffer));
+            GPIO_toggle(LED_1);
+            logPos++;
+        }
+
+        NVS_close(nvsHandle);
+        UART_close(uart);
+        GPIO_write(LED_1, 0);
+    }
+
+}
+
+static uint32_t rev32(uint32_t bytes)
+{
+    uint32_t aux = 0;
+    uint8_t byte;
+    int i;
+
+    for (i = 0; i < 32; i += 8)
+    {
+        byte = (bytes >> i) & 0xff;
+        aux |= byte << (32 - 8 - i);
+    }
+    return aux;
+}
+
 static void recallNVS(void)
 {
     nvsHandle = NVS_open(NVS_JUXTA_CONFIG, NULL);
@@ -446,6 +505,10 @@ static void saveConfigs(void)
                   sizeof(nvsConfigBuffer),
                   NVS_WRITE_POST_VERIFY);
         NVS_close(nvsHandle);
+
+        uint32_t logCount_human = rev32(logCount);
+        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, SIMPLEPROFILE_CHAR1_LEN,
+                                   &logCount_human);
     }
 }
 
@@ -487,7 +550,6 @@ static void logScan(void) // called after MR_EVT_ADV_REPORT -> multi_role_addSca
                            scanList[i].addr, B_ADDR_LEN);
                     memcpy(nvsDataBuffer + JUXTA_LOG_OFFSET_RSSI,
                            &scanList[i].rssi, 1);
-
                     memcpy(nvsDataBuffer + JUXTA_LOG_OFFSET_TIME, &localTime,
                            sizeof(localTime));
 
@@ -612,7 +674,8 @@ static void multi_role_init(void)
     NVS_init();
     recallNVS();
     // !! until there is a real reset?
-    if (logCount > 10000) {
+    if (logCount > 10000)
+    {
         logCount = 0;
         saveConfigs();
     }
@@ -737,22 +800,28 @@ static void multi_role_init(void)
     // For more information, see the GATT and GATTServApp sections in the User's Guide:
     // http://software-dl.ti.com/lprf/ble5stack-latest/
     {
-        uint8_t charValue1 = 1;
-        uint8_t charValue2 = 2;
-        uint8_t charValue3 = 3;
-        uint8_t charValue4 = 4;
-        uint8_t charValue5[SIMPLEPROFILE_CHAR5_LEN] = { 1, 2, 3, 4, 5 };
+        uint8_t charValue1[SIMPLEPROFILE_CHAR1_LEN] = { 0, 0, 0, 0 };
+        uint32_t logCount_human = rev32(logCount);
+        memcpy(charValue1, &logCount_human, sizeof(logCount_human));
 
-        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, sizeof(uint8_t),
-                                   &charValue1);
-        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR2, sizeof(uint8_t),
-                                   &charValue2);
+        uint8_t charValue2[SIMPLEPROFILE_CHAR2_LEN] = { 0, 0, 0, 0 };
+        uint32_t localTime_human = rev32(localTime);
+        memcpy(charValue2, &localTime_human, sizeof(localTime_human));
+
+        uint8_t charValue3 = (uint8_t) sniffAdv;
+//        uint8_t charValue4 = 4;
+//        uint8_t charValue5[SIMPLEPROFILE_CHAR5_LEN] = { 1, 2, 3, 4, 5 };
+
+        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR1, SIMPLEPROFILE_CHAR1_LEN,
+                                   charValue1);
+        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR2, SIMPLEPROFILE_CHAR2_LEN,
+                                   charValue2);
         SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR3, sizeof(uint8_t),
                                    &charValue3);
-        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, sizeof(uint8_t),
-                                   &charValue4);
-        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, SIMPLEPROFILE_CHAR5_LEN,
-                                   charValue5);
+//        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, sizeof(uint8_t),
+//                                   &charValue4);
+//        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR5, SIMPLEPROFILE_CHAR5_LEN,
+//                                   charValue5);
     }
 
     // Register callback with SimpleGATTprofile
@@ -776,6 +845,11 @@ static void multi_role_init(void)
 
     GPIO_write(LED_0, 0);
     GPIO_write(LED_1, 0);
+
+    if (GPIO_read(DEBUG) == 0)
+    {
+        dumpLog();
+    }
 }
 
 /*********************************************************************
@@ -1864,6 +1938,9 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
 //    }
     case JUXTA_EVT_PERIODIC:
     {
+        uint32_t localTime_human = rev32(localTime);
+        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR2, SIMPLEPROFILE_CHAR2_LEN,
+                                   &localTime_human);
         if (juxtaRadio)
         {
             GPIO_toggle(LED_1); // debug
@@ -2237,27 +2314,49 @@ static status_t multi_role_enqueueMsg(uint8_t event, void *pData)
  */
 static void multi_role_processCharValueChangeEvt(uint8_t paramId)
 {
-    uint8_t newValue;
+    uint8_t len;
+    bStatus_t retProfile;
 
     switch (paramId)
     {
     case SIMPLEPROFILE_CHAR1:
-        SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, &newValue);
-
-        Display_printf(dispHandle, MR_ROW_CHARSTAT, 0, "Char 1: %d",
-                (uint16_t) newValue);
+        len = SIMPLEPROFILE_CHAR1_LEN;
         break;
-
+    case SIMPLEPROFILE_CHAR2:
+        len = SIMPLEPROFILE_CHAR2_LEN;
+        break;
     case SIMPLEPROFILE_CHAR3:
-        SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, &newValue);
+        len = sizeof(uint8_t);
+        break;
+    default:
+        break;
+    }
 
-        Display_printf(dispHandle, MR_ROW_CHARSTAT, 0, "Char 3: %d",
-                (uint16_t) newValue);
+    uint8_t *pValue = ICall_malloc(len); // dynamic allocation
+
+    switch (paramId)
+    {
+    // only characteristics with GATT_PROP_WRITE, all others are written elsewhere
+    case SIMPLEPROFILE_CHAR1:
+        retProfile = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, pValue);
+        memcpy(&logCount, pValue, sizeof(uint32_t)); // these should come in MSB from iOS app
+        break;
+    case SIMPLEPROFILE_CHAR2:
+        retProfile = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR2, pValue);
+        memcpy(&localTime, pValue, sizeof(uint32_t)); // these should come in MSB from iOS app
+        break;
+    case SIMPLEPROFILE_CHAR3:
+        retProfile = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, pValue);
+        sniffAdv = (bool) pValue[0];
         break;
 
     default:
 // should not reach here!
         break;
+    }
+    if (retProfile)
+    {
+        ICall_free(pValue);
     }
 }
 
@@ -2276,18 +2375,18 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramId)
  */
 static void multi_role_performPeriodicTask(void)
 {
-    uint8_t valueToCopy;
+//    uint8_t valueToCopy;
 
-    // Call to retrieve the value of the third characteristic in the profile
-    if (SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, &valueToCopy) == SUCCESS)
-    {
-// Call to set that value of the fourth characteristic in the profile.
-// Note that if notifications of the fourth characteristic have been
-// enabled by a GATT client device, then a notification will be sent
-// every time this function is called.
-        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, sizeof(uint8_t),
-                                   &valueToCopy);
-    }
+//    // Call to retrieve the value of the third characteristic in the profile
+//    if (SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, &valueToCopy) == SUCCESS)
+//    {
+//// Call to set that value of the fourth characteristic in the profile.
+//// Note that if notifications of the fourth characteristic have been
+//// enabled by a GATT client device, then a notification will be sent
+//// every time this function is called.
+//        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, sizeof(uint8_t),
+//                                   &valueToCopy);
+//    }
 }
 
 /*********************************************************************

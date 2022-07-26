@@ -37,6 +37,8 @@ const SPI         = scripting.addModule("/ti/drivers/SPI", {}, false);
 const SPI1        = SPI.addInstance();
 const TRNG        = scripting.addModule("/ti/drivers/TRNG");
 const TRNG1       = TRNG.addInstance();
+const UART        = scripting.addModule("/ti/drivers/UART", {}, false);
+const UART1       = UART.addInstance();
 
 /**
  * Write custom configuration values to the imported modules.
@@ -45,20 +47,20 @@ ble.deviceRole                                            = "PERIPHERAL_CFG+CENT
 ble.disDevBySerUuid                                       = true;
 ble.numOfAdvSets                                          = 1;
 ble.numOfDefAdvSets                                       = 1;
-ble.bondPairing                                           = "GAPBOND_PAIRING_MODE_INITIATE";
 ble.maxConnNum                                            = 1;
 ble.disableDisplayModule                                  = true;
 ble.advRptFields                                          = ["SCAN_ADVRPT_FLD_ADDRESS","SCAN_ADVRPT_FLD_ADDRTYPE","SCAN_ADVRPT_FLD_RSSI"];
 ble.randomAddress                                         = "A2:00:00:00:00:00";
 ble.addressMode                                           = "ADDRMODE_PUBLIC";
 ble.deviceName                                            = "Juxta";
+ble.bondMITMProtection                                    = false;
 ble.radioConfig.txPower                                   = "0";
 ble.radioConfig.codeExportConfig.$name                    = "ti_devices_radioconfig_code_export_param0";
 ble.connUpdateParamsPeripheral.$name                      = "ti_ble5stack_general_ble_conn_update_params0";
+ble.connUpdateParamsPeripheral.reqMinConnInt              = 100;
+ble.connUpdateParamsPeripheral.reqMaxConnInt              = 200;
 ble.advSet1.$name                                         = "ti_ble5stack_broadcaster_advertisement_set0";
 ble.advSet1.advParam1.$name                               = "ti_ble5stack_broadcaster_advertisement_params0";
-ble.advSet1.advParam1.primIntMin                          = 250;
-ble.advSet1.advParam1.primIntMax                          = 250;
 ble.advSet1.advData1.$name                                = "ti_ble5stack_broadcaster_advertisement_data0";
 ble.advSet1.advData1.GAP_ADTYPE_FLAGS                     = true;
 ble.advSet1.advData1.advertisingFlags                     = ["GAP_ADTYPE_FLAGS_BREDR_NOT_SUPPORTED","GAP_ADTYPE_FLAGS_GENERAL"];
@@ -101,6 +103,7 @@ GPIO2.gpioPin.$assign = "DIO_17";
 
 GPIO3.$name            = "DEBUG";
 GPIO3.callbackFunction = "";
+GPIO3.pull             = "Pull Up";
 GPIO3.gpioPin.$assign  = "DIO_22";
 
 GPIO4.$name           = "LED_0";
@@ -146,6 +149,12 @@ SPI1.ssPinInstance.outputStrength   = "Low";
 
 TRNG1.$name = "CONFIG_TRNG_0";
 
+UART1.$name               = "JUXTA_UART";
+UART1.uart.txPin.$assign  = "DIO_25";
+UART1.uart.rxPin.$assign  = "DIO_24";
+UART1.txPinInstance.$name = "CONFIG_GPIO_0";
+UART1.rxPinInstance.$name = "CONFIG_GPIO_1";
+
 /**
  * Pinmux solution for unlocked pins/peripherals. This ensures that minor changes to the automatic solver in a future
  * version of the tool will not impact the pinmux you originally saw.  These lines can be completely deleted in order to
@@ -154,3 +163,4 @@ TRNG1.$name = "CONFIG_TRNG_0";
 SPI1.spi.$suggestSolution              = "SSI0";
 SPI1.spi.dmaRxChannel.$suggestSolution = "DMA_CH3";
 SPI1.spi.dmaTxChannel.$suggestSolution = "DMA_CH4";
+UART1.uart.$suggestSolution            = "UART0";
