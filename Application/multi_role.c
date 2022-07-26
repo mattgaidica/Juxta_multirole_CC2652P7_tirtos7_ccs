@@ -431,7 +431,7 @@ static void dumpLog()
 
     uint32_t i, offset;
     uint32_t logPos = 0;
-    uint8_t headerByte = 0x99;
+    uint8_t flushByte = 0x99;
 
     UART_Params uartParams;
     UART_Params_init(&uartParams);
@@ -444,7 +444,7 @@ static void dumpLog()
         // header, should send address
         for (i = 0; i < 10; i++)
         {
-            UART_write(uart, &headerByte, sizeof(uint8_t));
+            UART_write(uart, &flushByte, sizeof(uint8_t));
             GPIO_toggle(LED_1);
         }
         UART_write(uart, attDeviceName, sizeof(attDeviceName));
