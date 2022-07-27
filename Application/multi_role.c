@@ -344,7 +344,7 @@ typedef enum
     JUXTA_MODE_AXY_LOGGER, JUXTA_MODE_SHELF, JUXTA_MODE_ADVERTISE_NOSCAN
 } juxtaMode_t;
 
-static uint8_t juxtaMode = JUXTA_MODE_AXY_LOGGER;
+static uint8_t juxtaMode = JUXTA_MODE_SHELF;
 
 NVS_Handle nvsHandle;
 NVS_Attrs regionAttrs;
@@ -463,6 +463,8 @@ static void shutdownLEDs(void)
 
 static void modeCallback(uint8_t newMode)
 {
+    MC36XX_interrupt_event_t evt_mc36xx = { 0 };
+
     if (newMode == JUXTA_MODE_AXY_LOGGER)
     {
         resetSniff();
@@ -470,6 +472,13 @@ static void modeCallback(uint8_t newMode)
     else
     {
         MC3635_stop(spiHandle);
+        if (spiHandle != NULL)
+        {
+            while (GPIO_read(AXY_INT) == 0)
+            {
+                MC3635_INTHandler(spiHandle, &evt_mc36xx); // reset interrupt
+            }
+        }
     }
     juxtaMode = newMode;
 }
@@ -2022,7 +2031,8 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
             }
             else
             {
-                if (juxtaRadioCount > 0) {
+                if (juxtaRadioCount > 0)
+                {
                     toggleLED(LED_1); // only on scan
                 }
                 juxtaRadioCount++;
@@ -2435,7 +2445,6 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramId)
 //static void multi_role_performPeriodicTask(void)
 //{
 //    uint8_t valueToCopy;
-
 //    // Call to retrieve the value of the third characteristic in the profile
 //    if (SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, &valueToCopy) == SUCCESS)
 //    {
@@ -2447,7 +2456,6 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramId)
 //                                   &valueToCopy);
 //    }
 //}
-
 /*********************************************************************
  * @fn      multi_role_updateRPA
  *
