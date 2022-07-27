@@ -77,21 +77,23 @@
 #define MR_EVT_READ_RPA            12
 #define MR_EVT_INSUFFICIENT_MEM    13
 #define JUXTA_EVT_SNIFF            14
-#define JUXTA_EVT_ALL_TIMEOUT      15
-#define JUXTA_EVT_ADV_TIMEOUT      16
-#define JUXTA_EVT_SCAN_TIMEOUT     17
-#define JUXTA_EVT_RESET            18
-#define JUXTA_EVT_MAGNET_PERIODIC  19
+//#define JUXTA_EVT_ALL_TIMEOUT      15
+//#define JUXTA_EVT_ADV_TIMEOUT      16
+//#define JUXTA_EVT_SCAN_TIMEOUT     17
+//#define JUXTA_EVT_RESET            18
+//#define JUXTA_EVT_MAGNET_PERIODIC  19
 #define JUXTA_EVT_PERIODIC         20
+#define JUXTA_EVT_LED_TIMEOUT     21
 
 // Non-events
 #define MR_PERIODIC_EVT_PERIOD          5000
-#define JUXTA_ADV_TIMEOUT_PERIOD        2000
-#define JUXTA_SCAN_TIMEOUT_PERIOD       1000 // less than DEFAULT_SCAN_DURATION
+//#define JUXTA_ADV_TIMEOUT_PERIOD        2000
+//#define JUXTA_SCAN_TIMEOUT_PERIOD       1000 // less than DEFAULT_SCAN_DURATION
 #define JUXTA_SCAN_N_TIMES              5
-#define JUXTA_MAGNET_PERIOD             1000
+//#define JUXTA_MAGNET_PERIOD             1000
 #define JUXTA_PERIODIC_PERIOD           1000 // time keeper
 #define JUXTA_SNIFF_STARTUP_DELAY       5 // seconds
+#define JUXTA_LED_TIMEOUT_PERIOD        5 // ms
 
 // Juxta NVS
 #define JUXTA_LOG_SIZE              17 // bytes
@@ -262,7 +264,7 @@ ICall_SyncHandle syncEvent;
 static ICall_SyncHandle syncEvent;
 #endif
 // Clock instances for internal periodic events.
-static Clock_Struct clkPeriodic;
+//static Clock_Struct clkPeriodic;
 // Clock instance for RPA read events.
 static Clock_Struct clkRpaRead;
 
@@ -325,17 +327,24 @@ static uint8_t mrInitPhy = INIT_PHY_1M;
 
 //**** JUXTA ****
 SPI_Handle spiHandle;
-static Clock_Struct clkJuxtaAdvTimeout;
-static Clock_Struct clkJuxtaScanTimeout;
-static Clock_Struct clkJuxtaMagnet;
+//static Clock_Struct clkJuxtaAdvTimeout;
+//static Clock_Struct clkJuxtaScanTimeout;
+//static Clock_Struct clkJuxtaMagnet;
 static Clock_Struct clkJuxtaPeriodic;
+static Clock_Struct clkJuxtaLEDTimeout;
 
-mrClockEventData_t argJuxtaAdvTimeout = { .event = JUXTA_EVT_ADV_TIMEOUT };
-mrClockEventData_t argJuxtaScanTimeout = { .event = JUXTA_EVT_SCAN_TIMEOUT };
-mrClockEventData_t argJuxtaMagnet = { .event = JUXTA_EVT_MAGNET_PERIODIC };
+//mrClockEventData_t argJuxtaAdvTimeout = { .event = JUXTA_EVT_ADV_TIMEOUT };
+//mrClockEventData_t argJuxtaScanTimeout = { .event = JUXTA_EVT_SCAN_TIMEOUT };
+//mrClockEventData_t argJuxtaMagnet = { .event = JUXTA_EVT_MAGNET_PERIODIC };
 mrClockEventData_t argJuxtaPeriodic = { .event = JUXTA_EVT_PERIODIC };
+mrClockEventData_t argJuxtaLEDTimeout = { .event = JUXTA_EVT_LED_TIMEOUT };
 
-static bool sniffAdv = true;
+typedef enum
+{
+    JUXTA_MODE_AXY_LOGGER, JUXTA_MODE_SHELF, JUXTA_MODE_ADVERTISE_NOSCAN
+} juxtaMode_t;
+
+static uint8_t juxtaMode = JUXTA_MODE_AXY_LOGGER;
 
 NVS_Handle nvsHandle;
 NVS_Attrs regionAttrs;
@@ -402,6 +411,18 @@ static void multi_role_pairStateCB(uint16_t connHandle, uint8_t state,
                                    uint8_t status);
 static void multi_role_updateRPA(void);
 
+// **** JUXTA FUNCTIONS ****
+static void toggleLED(uint8_t index);
+static void shutdownLEDs(void);
+static void modeCallback(void);
+static void dumpLog(void);
+static uint32_t rev32(uint32_t bytes);
+static void recallNVS(void);
+static void saveConfigs(void);
+static void logScan(void);
+static void resetSniff(void);
+static void blink(uint8_t runOnce);
+
 /*********************************************************************
  * EXTERN FUNCTIONS
  */
@@ -425,7 +446,35 @@ static gapBondCBs_t multi_role_BondMgrCBs = { multi_role_passcodeCB, // Passcode
  * PUBLIC FUNCTIONS
  */
 
-static void dumpLog()
+static void toggleLED(uint8_t index)
+{
+    if (index == LED_0 || index == LED_1)
+    {
+        GPIO_write(index, 1);
+        Util_startClock(&clkJuxtaLEDTimeout);
+    }
+}
+
+static void shutdownLEDs(void)
+{
+    GPIO_write(LED_0, 0);
+    GPIO_write(LED_1, 0);
+}
+
+static void modeCallback(uint8_t newMode)
+{
+    if (newMode == JUXTA_MODE_AXY_LOGGER)
+    {
+        resetSniff();
+    }
+    else
+    {
+        MC3635_stop(spiHandle);
+    }
+    juxtaMode = newMode;
+}
+
+static void dumpLog(void)
 {
     UART_init();
 
@@ -454,7 +503,7 @@ static void dumpLog()
         {
             offset = logPos * JUXTA_LOG_SIZE;
             NVS_read(nvsHandle, offset, (void*) nvsDataBuffer,
-                            sizeof(nvsDataBuffer));
+                     sizeof(nvsDataBuffer));
             UART_write(uart, nvsDataBuffer, sizeof(nvsDataBuffer));
             GPIO_toggle(LED_1);
             logPos++;
@@ -690,7 +739,7 @@ static void multi_role_init(void)
     {
         blink(0); // error
     }
-    resetSniff(); // must do for first detection
+    modeCallback(); // resets sniff for JUXTA_MODE_AXY_LOGGER, stops sniff for others
 
     BLE_LOG_INT_TIME(0, BLE_LOG_MODULE_APP, "APP : ---- init ", MR_TASK_PRIORITY);
     // MGRM Create the menu
@@ -720,27 +769,30 @@ static void multi_role_init(void)
     appMsgQueue = Util_constructQueue(&appMsg);
 
     // Create one-shot clock for internal periodic events.
-    Util_constructClock(&clkPeriodic, multi_role_clockHandler,
-    MR_PERIODIC_EVT_PERIOD,
-                        0, false, (UArg) &periodicUpdateData);
+//    Util_constructClock(&clkPeriodic, multi_role_clockHandler,
+//    MR_PERIODIC_EVT_PERIOD,
+//                        0, false, (UArg) &periodicUpdateData);
 
     // Create one-shot clocks for Juxta timeouts
-    Util_constructClock(&clkJuxtaAdvTimeout, multi_role_clockHandler,
-    JUXTA_ADV_TIMEOUT_PERIOD,
-                        0, false, (UArg) &argJuxtaAdvTimeout);
+//    Util_constructClock(&clkJuxtaAdvTimeout, multi_role_clockHandler,
+//                        JUXTA_ADV_TIMEOUT_PERIOD, 0, false,
+//                        (UArg) &argJuxtaAdvTimeout);
 
-    Util_constructClock(&clkJuxtaScanTimeout, multi_role_clockHandler,
-    JUXTA_SCAN_TIMEOUT_PERIOD,
-                        0, false, (UArg) &argJuxtaScanTimeout);
+//    Util_constructClock(&clkJuxtaScanTimeout, multi_role_clockHandler,
+//                        JUXTA_SCAN_TIMEOUT_PERIOD, 0, false,
+//                        (UArg) &argJuxtaScanTimeout);
 
     // could also be periodic and use stopClock(), see JUXTA_EVT_MAGNET_PERIODIC
-    Util_constructClock(&clkJuxtaMagnet, multi_role_clockHandler,
-    JUXTA_MAGNET_PERIOD,
-                        0, false, (UArg) &argJuxtaMagnet);
+//    Util_constructClock(&clkJuxtaMagnet, multi_role_clockHandler,
+//                        JUXTA_MAGNET_PERIOD, 0, false, (UArg) &argJuxtaMagnet);
 
     Util_constructClock(&clkJuxtaPeriodic, multi_role_clockHandler,
     JUXTA_PERIODIC_PERIOD,
                         JUXTA_PERIODIC_PERIOD, true, (UArg) &argJuxtaPeriodic);
+
+    Util_constructClock(&clkJuxtaLEDTimeout, multi_role_clockHandler,
+    JUXTA_LED_TIMEOUT_PERIOD,
+                        0, false, (UArg) &argJuxtaLEDTimeout);
 
     // MGRM Init key debouncer
 //    Board_initKeys(multi_role_keyChangeHandler);
@@ -808,7 +860,7 @@ static void multi_role_init(void)
         uint32_t localTime_human = rev32(localTime);
         memcpy(charValue2, &localTime_human, sizeof(localTime_human));
 
-        uint8_t charValue3 = (uint8_t) sniffAdv;
+        uint8_t charValue3 = juxtaMode;
 //        uint8_t charValue4 = 4;
 //        uint8_t charValue5[SIMPLEPROFILE_CHAR5_LEN] = { 1, 2, 3, 4, 5 };
 
@@ -843,8 +895,7 @@ static void multi_role_init(void)
     GAP_DeviceInit(GAP_PROFILE_PERIPHERAL | GAP_PROFILE_CENTRAL, selfEntity,
                    addrMode, &pRandomAddress);
 
-    GPIO_write(LED_0, 0);
-    GPIO_write(LED_1, 0);
+    shutdownLEDs();
 
     if (GPIO_read(DEBUG) == 0)
     {
@@ -1163,7 +1214,7 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
 
         connList[connIndex].charHandle = 0;
 
-        Util_startClock(&clkPeriodic);
+//        Util_startClock(&clkPeriodic); Matt: removed
 
         pStrAddr = (uint8_t*) Util_convertBdAddr2Str(connList[connIndex].addr);
 
@@ -1255,8 +1306,7 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
 //        }
 
 // Start advertising since there is room for more connections
-// Matt: unless sniffAdv mode = true
-        if (!sniffAdv)
+        if (juxtaMode == JUXTA_MODE_ADVERTISE_NOSCAN)
         {
             GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
         }
@@ -1271,7 +1321,7 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
         if (numConn == 0)
         {
             // Stop periodic clock
-            Util_stopClock(&clkPeriodic);
+//            Util_stopClock(&clkPeriodic);
 //            tbm_setItemStatus(&mrMenuMain, TBM_ITEM_NONE, TBM_ITEM_ALL);
 //            tbm_setItemStatus(
 //                    &mrMenuMain,
@@ -1474,7 +1524,7 @@ static void multi_role_advertInit(void)
 
     BLE_LOG_INT_TIME(0, BLE_LOG_MODULE_APP, "APP : ---- GapAdv_enable", 0);
     // Enable legacy advertising for set #1
-    if (!sniffAdv)
+    if (juxtaMode == JUXTA_MODE_ADVERTISE_NOSCAN)
     {
         status = GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
     }
@@ -1604,13 +1654,13 @@ static uint8_t multi_role_processGATTMsg(gattMsgEvent_t *pMsg)
 }
 
 /*********************************************************************
- * @fn		multi_role_processParamUpdate
+ * @fn      multi_role_processParamUpdate
  *
- * @brief	Process connection parameters update
+ * @brief   Process connection parameters update
  *
- * @param	connHandle - connection handle to update
+ * @param   connHandle - connection handle to update
  *
- * @return	None.
+ * @return  None.
  */
 static void multi_role_processParamUpdate(uint16_t connHandle)
 {
@@ -1941,9 +1991,9 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
         uint32_t localTime_human = rev32(localTime);
         SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR2, SIMPLEPROFILE_CHAR2_LEN,
                                    &localTime_human);
+
         if (juxtaRadio)
         {
-            GPIO_toggle(LED_1); // debug
             if (juxtaRadioCount == 0) // advertise segment
             {
                 if (mrIsAdvertising == false)
@@ -1951,7 +2001,7 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
                     // Turn on advertising
                     GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
                     mrIsAdvertising = true;
-                    GPIO_write(LED_0, mrIsAdvertising);
+                    toggleLED(LED_0);
                 }
             }
             else if (juxtaRadioCount == 1) // scan segment
@@ -1961,7 +2011,6 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
                     // Turn off advertising
                     GapAdv_disable(advHandle);
                     mrIsAdvertising = false;
-                    GPIO_write(LED_0, mrIsAdvertising);
                 }
                 multi_role_doDiscoverDevices(0); // resets numScanRes
             }
@@ -1971,20 +2020,22 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
                 logScan();
                 juxtaRadioCount = 0;
                 juxtaRadio = false;
-                GPIO_write(LED_0, 0);
-                GPIO_write(LED_1, 0);
             }
             else
             {
+                if (juxtaRadioCount > 0) {
+                    toggleLED(LED_1); // only on scan
+                }
                 juxtaRadioCount++;
             }
         }
-        else
+        else // radio sequence (adv/scan) is not engaged
         {
-            if (GPIO_read(MAGNET) == 0) // active
+            if (GPIO_read(MAGNET) == 0
+                    || juxtaMode == JUXTA_MODE_ADVERTISE_NOSCAN) // active
             {
                 GapScan_disable();
-                GPIO_toggle(LED_0);
+                toggleLED(LED_0);
                 if (mrIsAdvertising == false)
                 {
                     // Turn on advertising
@@ -1992,9 +2043,9 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
                     mrIsAdvertising = true;
                 }
             }
-            else
+            else // no magnet
             {
-                GPIO_write(LED_0, 0);
+                shutdownLEDs();
                 if (mrIsAdvertising == true)
                 {
                     // Turn off advertising
@@ -2007,20 +2058,27 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
                     if (GPIO_read(AXY_INT) == 0) // active
                     {
                         resetSniff(); // resets internal interrupt
-                        juxtaRadio = true;
+                        if (juxtaMode == JUXTA_MODE_AXY_LOGGER)
+                            juxtaRadio = true;
                     }
-
                 }
-            }
 
-            if (localTime < JUXTA_SNIFF_STARTUP_DELAY) // sniff not ready, not sure why this is
-            {
-                if (GPIO_read(AXY_INT) == 0) // active
-                {
-                    resetSniff(); // resets internal interrupt
-                }
             }
         }
+
+        if (localTime < JUXTA_SNIFF_STARTUP_DELAY) // sniff not ready, not sure why this is
+        {
+            if (GPIO_read(AXY_INT) == 0) // active
+            {
+                resetSniff(); // resets internal interrupt
+            }
+        }
+        break;
+    }
+
+    case JUXTA_EVT_LED_TIMEOUT:
+    {
+        shutdownLEDs();
         break;
     }
 
@@ -2091,8 +2149,8 @@ static void multi_role_processAdvEvent(mrGapAdvEventData_t *pEventData)
         break;
     }
 
-    // All events have associated memory to free except the insufficient memory
-    // event
+// All events have associated memory to free except the insufficient memory
+// event
     if (pEventData->event != GAP_EVT_INSUFFICIENT_MEMORY)
     {
         ICall_free(pEventData->pBuf);
@@ -2165,7 +2223,7 @@ static bool multi_role_findSvcUuid(uint16_t uuid, uint8_t *pData,
         }
     }
 
-    // Match not found
+// Match not found
     return FALSE;
 }
 
@@ -2181,7 +2239,7 @@ static void multi_role_addScanInfo(uint8_t *pAddr, uint8_t addrType,
 {
     uint8_t i;
 
-    // If result count not at max
+// If result count not at max
     if (numScanRes < DEFAULT_MAX_SCAN_RES)
     {
 // Check if device is already in scan results
@@ -2261,7 +2319,7 @@ static void multi_role_charValueChangeCB(uint8_t paramID)
 {
     uint8_t *pData;
 
-    // Allocate space for the event data.
+// Allocate space for the event data.
     if ((pData = ICall_malloc(sizeof(uint8_t))))
     {
         *pData = paramID;
@@ -2290,7 +2348,7 @@ static status_t multi_role_enqueueMsg(uint8_t event, void *pData)
     uint8_t success;
     mrEvt_t *pMsg = ICall_malloc(sizeof(mrEvt_t));
 
-    // Create dynamic pointer to message.
+// Create dynamic pointer to message.
     if (pMsg)
     {
         pMsg->event = event;
@@ -2336,18 +2394,20 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramId)
 
     switch (paramId)
     {
-    // only characteristics with GATT_PROP_WRITE, all others are written elsewhere
+// only characteristics with GATT_PROP_WRITE, all others are written elsewhere
     case SIMPLEPROFILE_CHAR1:
         retProfile = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, pValue);
         memcpy(&logCount, pValue, sizeof(uint32_t)); // these should come in MSB from iOS app
+        logCount = rev32(logCount);
         break;
     case SIMPLEPROFILE_CHAR2:
         retProfile = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR2, pValue);
-        memcpy(&localTime, pValue, sizeof(uint32_t)); // these should come in MSB from iOS app
+        memcpy(&localTime, pValue, sizeof(uint32_t)); // this needs to be reversed, comes MSB from iOS
+        localTime = rev32(localTime);
         break;
     case SIMPLEPROFILE_CHAR3:
         retProfile = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR3, pValue);
-        sniffAdv = (bool) pValue[0];
+        modeCallback(pValue[0]);
         break;
 
     default:
@@ -2403,7 +2463,7 @@ static void multi_role_updateRPA(void)
 {
     uint8_t *pRpaNew;
 
-    // Read the current RPA.
+// Read the current RPA.
     pRpaNew = GAP_GetDevAddress(FALSE);
 
     if (memcmp(pRpaNew, rpa, B_ADDR_LEN))
@@ -2428,15 +2488,15 @@ static void multi_role_clockHandler(UArg arg)
 {
     mrClockEventData_t *pData = (mrClockEventData_t*) arg;
 
-    if (pData->event == MR_EVT_PERIODIC)
-    {
-// Start the next period
-        Util_startClock(&clkPeriodic);
-
-// Send message to perform periodic task
-        multi_role_enqueueMsg(MR_EVT_PERIODIC, NULL);
-    }
-    else if (pData->event == MR_EVT_READ_RPA)
+//    if (pData->event == MR_EVT_PERIODIC)
+//    {
+//// Start the next period
+//        Util_startClock(&clkPeriodic);
+//
+//// Send message to perform periodic task
+//        multi_role_enqueueMsg(MR_EVT_PERIODIC, NULL);
+//    }
+    if (pData->event == MR_EVT_READ_RPA)
     {
 // Start the next period
         Util_startClock(&clkRpaRead);
@@ -2479,6 +2539,10 @@ static void multi_role_clockHandler(UArg arg)
     {
         multi_role_enqueueMsg(JUXTA_EVT_PERIODIC, NULL);
         localTime++;
+    }
+    else if (pData->event == JUXTA_EVT_LED_TIMEOUT)
+    {
+        multi_role_enqueueMsg(JUXTA_EVT_LED_TIMEOUT, NULL);
     }
 }
 
@@ -3182,20 +3246,15 @@ bool multi_role_doConnect(uint8_t index)
                     0);
 #endif // DEFAULT_DEV_DISC_BY_SVC_UUID
 
-// Re-enable advertising, check for Juxta sniffAdv
-    if (!sniffAdv)
-    {
-        GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
+    GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
 
 // Enable only "Cancel Connecting" and disable all others in the main menu
 //        tbm_setItemStatus(&mrMenuMain, MR_ITEM_CANCELCONN,
 //                          (MR_ITEM_ALL & ~MR_ITEM_CANCELCONN));
 
-        Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Connecting...");
+    Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Connecting...");
 
 //        tbm_goTo(&mrMenuMain);
-    }
-
     return (true);
 }
 
