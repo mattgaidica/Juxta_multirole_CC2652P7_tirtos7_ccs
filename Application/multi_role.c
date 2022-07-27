@@ -73,7 +73,7 @@
 #define MR_EVT_PAIRING_STATE       8
 #define MR_EVT_PASSCODE_NEEDED     9
 #define MR_EVT_SEND_PARAM_UPDATE   10
-#define MR_EVT_PERIODIC            11
+//#define MR_EVT_PERIODIC            11
 #define MR_EVT_READ_RPA            12
 #define MR_EVT_INSUFFICIENT_MEM    13
 #define JUXTA_EVT_SNIFF            14
@@ -86,7 +86,7 @@
 #define JUXTA_EVT_LED_TIMEOUT     21
 
 // Non-events
-#define MR_PERIODIC_EVT_PERIOD          5000
+//#define MR_PERIODIC_EVT_PERIOD          5000
 //#define JUXTA_ADV_TIMEOUT_PERIOD        2000
 //#define JUXTA_SCAN_TIMEOUT_PERIOD       1000 // less than DEFAULT_SCAN_DURATION
 #define JUXTA_SCAN_N_TIMES              5
@@ -269,7 +269,7 @@ static ICall_SyncHandle syncEvent;
 static Clock_Struct clkRpaRead;
 
 // Memory to pass periodic event to clock handler
-mrClockEventData_t periodicUpdateData = { .event = MR_EVT_PERIODIC };
+//mrClockEventData_t periodicUpdateData = { .event = MR_EVT_PERIODIC };
 
 // Memory to pass RPA read event ID to clock handler
 mrClockEventData_t argRpaRead = { .event = MR_EVT_READ_RPA };
@@ -385,7 +385,7 @@ static uint16_t multi_role_getConnIndex(uint16_t connHandle);
 //static void multi_role_keyChangeHandler(uint8_t keys);
 static uint8_t multi_role_addConnInfo(uint16_t connHandle, uint8_t *pAddr,
                                       uint8_t role);
-static void multi_role_performPeriodicTask(void);
+//static void multi_role_performPeriodicTask(void);
 static void multi_role_clockHandler(UArg arg);
 
 static uint8_t multi_role_clearConnListEntry(uint16_t connHandle);
@@ -414,7 +414,7 @@ static void multi_role_updateRPA(void);
 // **** JUXTA FUNCTIONS ****
 static void toggleLED(uint8_t index);
 static void shutdownLEDs(void);
-static void modeCallback(void);
+static void modeCallback(uint8_t newMode);
 static void dumpLog(void);
 static uint32_t rev32(uint32_t bytes);
 static void recallNVS(void);
@@ -739,7 +739,7 @@ static void multi_role_init(void)
     {
         blink(0); // error
     }
-    modeCallback(); // resets sniff for JUXTA_MODE_AXY_LOGGER, stops sniff for others
+    modeCallback(juxtaMode); // resets sniff for JUXTA_MODE_AXY_LOGGER, stops sniff for others
 
     BLE_LOG_INT_TIME(0, BLE_LOG_MODULE_APP, "APP : ---- init ", MR_TASK_PRIORITY);
     // MGRM Create the menu
@@ -1777,7 +1777,6 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
 //        tbm_setItemStatus(&mrMenuMain, MR_ITEM_STOPDISC,
 //                          (MR_ITEM_ALL & ~MR_ITEM_STOPDISC));
         Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Discovering...");
-
         break;
     }
 
@@ -1895,11 +1894,11 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
         break;
     }
 
-    case MR_EVT_PERIODIC:
-    {
-        multi_role_performPeriodicTask();
-        break;
-    }
+//    case MR_EVT_PERIODIC:
+//    {
+//        multi_role_performPeriodicTask();
+//        break;
+//    }
 
     case MR_EVT_READ_RPA:
     {
@@ -2433,8 +2432,8 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramId)
  *
  * @return  None.
  */
-static void multi_role_performPeriodicTask(void)
-{
+//static void multi_role_performPeriodicTask(void)
+//{
 //    uint8_t valueToCopy;
 
 //    // Call to retrieve the value of the third characteristic in the profile
@@ -2447,7 +2446,7 @@ static void multi_role_performPeriodicTask(void)
 //        SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR4, sizeof(uint8_t),
 //                                   &valueToCopy);
 //    }
-}
+//}
 
 /*********************************************************************
  * @fn      multi_role_updateRPA
