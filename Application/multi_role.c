@@ -89,11 +89,11 @@
 //#define MR_PERIODIC_EVT_PERIOD          5000
 //#define JUXTA_ADV_TIMEOUT_PERIOD        2000
 //#define JUXTA_SCAN_TIMEOUT_PERIOD       1000 // less than DEFAULT_SCAN_DURATION
-#define JUXTA_SCAN_N_TIMES              5
+#define JUXTA_SCAN_N_TIMES              2
 //#define JUXTA_MAGNET_PERIOD             1000
 #define JUXTA_PERIODIC_PERIOD           1000 // time keeper
 #define JUXTA_SNIFF_STARTUP_DELAY       5 // seconds
-#define JUXTA_LED_TIMEOUT_PERIOD        5 // ms
+#define JUXTA_LED_TIMEOUT_PERIOD        2 // ms
 
 // Juxta NVS
 #define JUXTA_LOG_SIZE              17 // bytes
@@ -352,6 +352,7 @@ static uint32_t logCount = 0;
 static uint8_t nvsDataBuffer[JUXTA_LOG_SIZE];
 static uint32_t nvsConfigBuffer[JUXTA_CONFIG_SIZE];
 static uint32_t localTime = 0;
+static uint32_t juxtaStartupTime = JUXTA_SNIFF_STARTUP_DELAY;
 
 bool juxtaRadio = false;
 uint8_t juxtaRadioCount = 0;
@@ -467,9 +468,10 @@ static void modeCallback(uint8_t newMode)
 
     if (newMode == JUXTA_MODE_AXY_LOGGER)
     {
+        juxtaStartupTime = localTime + JUXTA_SNIFF_STARTUP_DELAY;
         resetSniff();
     }
-    else
+    else // try to clear interrupt so axylogger is not pending
     {
         MC3635_stop(spiHandle);
         if (spiHandle != NULL)
@@ -2062,7 +2064,7 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
                     mrIsAdvertising = false;
                 }
 
-                if (localTime > JUXTA_SNIFF_STARTUP_DELAY) // sniff ready
+                if (localTime >= juxtaStartupTime) // sniff ready
                 {
                     if (GPIO_read(AXY_INT) == 0) // active
                     {
@@ -2075,7 +2077,7 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
             }
         }
 
-        if (localTime < JUXTA_SNIFF_STARTUP_DELAY) // sniff not ready, not sure why this is
+        if (localTime < juxtaStartupTime) // sniff not ready, not sure why this is
         {
             if (GPIO_read(AXY_INT) == 0) // active
             {
