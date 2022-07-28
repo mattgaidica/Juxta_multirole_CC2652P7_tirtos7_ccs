@@ -585,6 +585,7 @@ static void logScan(void) // called after MR_EVT_ADV_REPORT -> multi_role_addSca
             NVS_getAttrs(nvsHandle, &regionAttrs);
             for (i = 0; i < numScanRes; i++)
             {
+                toggleLED(LED_1); // only on scan
                 offset = logCount * JUXTA_LOG_SIZE;
                 if (offset < regionAttrs.regionSize - JUXTA_LOG_SIZE)
                 {
@@ -620,7 +621,7 @@ static void logScan(void) // called after MR_EVT_ADV_REPORT -> multi_role_addSca
                 }
             }
             NVS_close(nvsHandle);
-            saveConfigs();
+            saveConfigs(); // to increment log count
         }
     }
 }
@@ -737,7 +738,7 @@ static void multi_role_init(void)
     if (logCount > 10000)
     {
         logCount = 0;
-        saveConfigs();
+        saveConfigs(); // save log count
     }
 
     SPI_init();
@@ -2011,7 +2012,7 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
                     // Turn on advertising
                     GapAdv_enable(advHandle, GAP_ADV_ENABLE_OPTIONS_USE_MAX, 0);
                     mrIsAdvertising = true;
-                    toggleLED(LED_0);
+//                    toggleLED(LED_0);
                 }
             }
             else if (juxtaRadioCount == 1) // scan segment
@@ -2035,7 +2036,7 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
             {
                 if (juxtaRadioCount > 0)
                 {
-                    toggleLED(LED_1); // only on scan
+//                    toggleLED(LED_1); // only on scan
                 }
                 juxtaRadioCount++;
             }
@@ -2410,6 +2411,7 @@ static void multi_role_processCharValueChangeEvt(uint8_t paramId)
         retProfile = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR1, pValue);
         memcpy(&logCount, pValue, sizeof(uint32_t)); // these should come in MSB from iOS app
         logCount = rev32(logCount);
+        saveConfigs(); // write log count
         break;
     case SIMPLEPROFILE_CHAR2:
         retProfile = SimpleProfile_GetParameter(SIMPLEPROFILE_CHAR2, pValue);
