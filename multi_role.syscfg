@@ -131,11 +131,11 @@ NVS1.internalFlash.regionSize = 0x4000;
 NVS2.$name                    = "NVS_JUXTA_DATA";
 NVS2.internalFlash.$name      = "ti_drivers_nvs_NVSCC26XX1";
 NVS2.internalFlash.regionBase = 0x10000;
-NVS2.internalFlash.regionSize = 0x4000;
+NVS2.internalFlash.regionSize = 0x16000;
 
 NVS3.$name                    = "NVS_JUXTA_CONFIG";
 NVS3.internalFlash.$name      = "ti_drivers_nvs_NVSCC26XX2";
-NVS3.internalFlash.regionBase = 0x14000;
+NVS3.internalFlash.regionBase = 0x26000;
 
 SPI1.$name                          = "CONFIG_SPI";
 SPI1.mode                           = "Four Pin SS Active Low";

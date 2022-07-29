@@ -495,7 +495,7 @@ static void dumpLog(void)
 
     UART_Params uartParams;
     UART_Params_init(&uartParams);
-    uartParams.baudRate = 115200;
+    uartParams.baudRate = 9600;
     uart = UART_open(JUXTA_UART, &uartParams); // UART_close(uart);
     nvsHandle = NVS_open(NVS_JUXTA_DATA, NULL);
 
@@ -575,7 +575,7 @@ static void saveConfigs(void)
 static void logScan(void) // called after MR_EVT_ADV_REPORT -> multi_role_addScanInfo()
 {
     // see: scanList, numScanRes
-    uint32_t offset, i;
+    uint32_t offset, i, k;
 
     if (numScanRes > 0)
     {
@@ -590,9 +590,12 @@ static void logScan(void) // called after MR_EVT_ADV_REPORT -> multi_role_addSca
                 if (offset < regionAttrs.regionSize - JUXTA_LOG_SIZE)
                 {
                     // erase NVS if log is on start of sector
-                    if (offset % regionAttrs.sectorSize == 0)
+                    if (logCount == 0)
                     {
-                        NVS_erase(nvsHandle, offset, regionAttrs.sectorSize);
+                        // erase all at once
+                        for (k = 0; k < regionAttrs.regionSize / regionAttrs.sectorSize; k++) {
+                            NVS_erase(nvsHandle, k * regionAttrs.sectorSize, regionAttrs.sectorSize);
+                        }
                     }
 
                     // clear buffer
@@ -734,12 +737,6 @@ static void multi_role_init(void)
 
     NVS_init();
     recallNVS();
-    // !! until there is a real reset?
-    if (logCount > 10000)
-    {
-        logCount = 0;
-        saveConfigs(); // save log count
-    }
 
     SPI_init();
     spiHandle = MC3635_init(CONFIG_SPI);
@@ -908,6 +905,20 @@ static void multi_role_init(void)
                    addrMode, &pRandomAddress);
 
     shutdownLEDs();
+
+//    offset = 16320;
+//    uint32_t offset = 225 * 17;
+//    nvsHandle = NVS_open(NVS_JUXTA_DATA, NULL);
+//    if (nvsHandle != NULL)
+//    {
+//        while (1)
+//        {
+//            NVS_read(nvsHandle, offset, (void*) nvsDataBuffer,
+//                     sizeof(nvsDataBuffer));
+//            blink(1);
+//        }
+//    }
+//    NVS_close(nvsHandle);
 
     if (GPIO_read(DEBUG) == 0)
     {
@@ -1213,7 +1224,7 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
         uint8_t *pAddr = ((gapEstLinkReqEvent_t*) pMsg)->devAddr;
         uint8_t connIndex;
 //        uint32_t itemsToDisable = MR_ITEM_STOPDISC | MR_ITEM_CANCELCONN;
-        uint8_t *pStrAddr;
+//        uint8_t *pStrAddr;
 //        uint8_t i;
 //        uint8_t numConnectable = 0;
 
@@ -1228,11 +1239,11 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
 
 //        Util_startClock(&clkPeriodic); Matt: removed
 
-        pStrAddr = (uint8_t*) Util_convertBdAddr2Str(connList[connIndex].addr);
+//        pStrAddr = (uint8_t*) Util_convertBdAddr2Str(connList[connIndex].addr);
 
-        Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Connected to %s",
-                pStrAddr);Display_printf(dispHandle, MR_ROW_NUM_CONN, 0, "Num Conns: %d",
-                numConn);
+//        Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "Connected to %s",
+//                pStrAddr);Display_printf(dispHandle, MR_ROW_NUM_CONN, 0, "Num Conns: %d",
+//                numConn);
 
 // Disable "Connect To" until another discovery is performed
 //        itemsToDisable |= MR_ITEM_CONNECT;
@@ -1285,7 +1296,7 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
         uint8_t connIndex;
 //        uint32_t itemsToEnable = MR_ITEM_STARTDISC | MR_ITEM_ADVERTISE
 //                | MR_ITEM_PHY;
-        uint8_t *pStrAddr;
+//        uint8_t *pStrAddr;
 //        uint8_t i;
 //        uint8_t numConnectable = 0;
 
@@ -1296,11 +1307,11 @@ static void multi_role_processGapMsg(gapEventHdr_t *pMsg)
 // connIndex cannot be equal to or greater than MAX_NUM_BLE_CONNS
         MULTIROLE_ASSERT(connIndex < MAX_NUM_BLE_CONNS);
 
-        pStrAddr = (uint8_t*) Util_convertBdAddr2Str(connList[connIndex].addr);
+//        pStrAddr = (uint8_t*) Util_convertBdAddr2Str(connList[connIndex].addr);
 
-        Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "%s is disconnected",
-                pStrAddr);Display_printf(dispHandle, MR_ROW_NUM_CONN, 0, "Num Conns: %d",
-                numConn);
+//        Display_printf(dispHandle, MR_ROW_NON_CONN, 0, "%s is disconnected",
+//                pStrAddr);Display_printf(dispHandle, MR_ROW_NUM_CONN, 0, "Num Conns: %d",
+//                numConn);
 
 //        for (i = 0; i < TBM_GET_NUM_ITEM(&mrMenuConnect); i++)
 //        {
