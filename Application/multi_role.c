@@ -93,7 +93,7 @@
 //#define JUXTA_MAGNET_PERIOD             1000
 #define JUXTA_PERIODIC_PERIOD           1000 // time keeper
 #define JUXTA_SNIFF_STARTUP_DELAY       5 // seconds
-#define JUXTA_LED_TIMEOUT_PERIOD        2 // ms
+#define JUXTA_LED_TIMEOUT_PERIOD        1 // ms
 
 // Juxta NVS
 #define JUXTA_LOG_SIZE              17 // bytes
