@@ -97,6 +97,7 @@
 #define JUXTA_LED_TIMEOUT_PERIOD        1 // ms
 #define TIME_SERVICE_UUID               0xEFFE // see iOS > BLEPeripheralApp
 #define TIME_MOD_OVERRIDE               120 // seconds, mod with localTime, adv/scan in logger mode
+#define TIME_MOD_JITTER                 5 // seconds, used for some randomness
 
 // Juxta NVS
 #define JUXTA_LOG_SIZE              17 // bytes
@@ -356,7 +357,6 @@ static uint8_t nvsDataBuffer[JUXTA_LOG_SIZE];
 static uint32_t nvsConfigBuffer[JUXTA_CONFIG_SIZE];
 static uint32_t localTime = 0;
 static uint32_t juxtaStartupTime = JUXTA_SNIFF_STARTUP_DELAY;
-uint8_t iosTime[4];
 
 bool juxtaRadio = false;
 uint8_t juxtaRadioCount = 0;
@@ -1793,25 +1793,16 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
         if (multi_role_findSvcUuid(TIME_SERVICE_UUID, pAdvRpt->pData,
                                    pAdvRpt->dataLen))
         {
-            uint8_t timeLoc;
-            uint8_t foundUUID = 0;
-            for (timeLoc = 0; timeLoc < pAdvRpt->dataLen - 1; timeLoc++)
+            uint8_t svcLoc;
+            uint8_t newTime[8] = { 0 };
+            for (svcLoc = 0; svcLoc < pAdvRpt->dataLen - 12; svcLoc++)
             {
-                if (pAdvRpt->pData[timeLoc] == LO_UINT16(TIME_SERVICE_UUID)
-                        && pAdvRpt->pData[timeLoc + 1]
+                if (pAdvRpt->pData[svcLoc] == LO_UINT16(TIME_SERVICE_UUID)
+                        && pAdvRpt->pData[svcLoc + 1]
                                 == HI_UINT16(TIME_SERVICE_UUID))
                 {
-                    foundUUID = 1;
-                }
-
-                // good to March 24, 2024
-                if (pAdvRpt->pData[timeLoc] > 0x62
-                        && pAdvRpt->pData[timeLoc] < 0x66 && foundUUID)
-                {
-                    iosTime[0] = pAdvRpt->pData[timeLoc - 3];
-                    iosTime[1] = pAdvRpt->pData[timeLoc - 2];
-                    iosTime[2] = pAdvRpt->pData[timeLoc - 1];
-                    iosTime[3] = pAdvRpt->pData[timeLoc];
+                    memcpy(newTime, pAdvRpt->pData + svcLoc + 4, sizeof(newTime));
+                    localTime = strtol((char*)newTime, NULL, 16);
                     multi_role_enqueueMsg(JUXTA_TIME_UPDATED, NULL);
                     break;
                 }
@@ -2114,8 +2105,10 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
 
                 if (localTime >= juxtaStartupTime) // sniff ready
                 {
-                    // either axy shake interrupted or time has been synced (iOS) and time%override is within some range
-                    if (GPIO_read(AXY_INT) == 0 || (iosTime > 0 && localTime % TIME_MOD_OVERRIDE < 10))
+                    // either axy sniff interrupted or time%override is within some range
+                    uint32_t randInc = rand() % TIME_MOD_JITTER; // add some random so devices are out of sync
+                    uint32_t tmod = (localTime + randInc) % TIME_MOD_OVERRIDE; // TIME_MOD_OVERRIDE;
+                    if (GPIO_read(AXY_INT) == 0 || tmod < TIME_MOD_JITTER * 2)
                     {
                         resetSniff(); // resets internal interrupt
                         if (juxtaMode == JUXTA_MODE_AXY_LOGGER)
@@ -2138,7 +2131,6 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
 
     case JUXTA_TIME_UPDATED:
     {
-        memcpy(&localTime, iosTime, sizeof(localTime));
         blink(true);
         blink(true);
         blink(true);
