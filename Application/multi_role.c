@@ -348,7 +348,7 @@ typedef enum
     JUXTA_MODE_AXY_LOGGER, JUXTA_MODE_SHELF, JUXTA_MODE_ADVERTISE_NOSCAN
 } juxtaMode_t;
 
-static uint8_t juxtaMode = JUXTA_MODE_AXY_LOGGER; //JUXTA_MODE_SHELF; // init mode
+static uint8_t juxtaMode = JUXTA_MODE_SHELF; // init mode
 
 NVS_Handle nvsHandle;
 NVS_Attrs regionAttrs;
@@ -1801,8 +1801,9 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
                         && pAdvRpt->pData[svcLoc + 1]
                                 == HI_UINT16(TIME_SERVICE_UUID))
                 {
-                    memcpy(newTime, pAdvRpt->pData + svcLoc + 4, sizeof(newTime));
-                    localTime = strtol((char*)newTime, NULL, 16);
+                    memcpy(newTime, pAdvRpt->pData + svcLoc + 4,
+                           sizeof(newTime));
+                    localTime = strtol((char*) newTime, NULL, 16);
                     multi_role_enqueueMsg(JUXTA_TIME_UPDATED, NULL);
                     break;
                 }
