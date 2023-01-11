@@ -84,6 +84,7 @@
 //#define JUXTA_EVT_MAGNET_PERIODIC  19
 #define JUXTA_EVT_PERIODIC         20
 #define JUXTA_EVT_LED_TIMEOUT     21
+#define JUXTA_TIME_UPDATED        22
 
 // Non-events
 //#define MR_PERIODIC_EVT_PERIOD          5000
@@ -94,6 +95,8 @@
 #define JUXTA_PERIODIC_PERIOD           1000 // time keeper
 #define JUXTA_SNIFF_STARTUP_DELAY       5 // seconds
 #define JUXTA_LED_TIMEOUT_PERIOD        1 // ms
+#define TIME_SERVICE_UUID               0xEFFE // see iOS > BLEPeripheralApp
+#define TIME_MOD_OVERRIDE               120 // seconds, mod with localTime, adv/scan in logger mode
 
 // Juxta NVS
 #define JUXTA_LOG_SIZE              17 // bytes
@@ -344,7 +347,7 @@ typedef enum
     JUXTA_MODE_AXY_LOGGER, JUXTA_MODE_SHELF, JUXTA_MODE_ADVERTISE_NOSCAN
 } juxtaMode_t;
 
-static uint8_t juxtaMode = JUXTA_MODE_SHELF;
+static uint8_t juxtaMode = JUXTA_MODE_AXY_LOGGER; //JUXTA_MODE_SHELF; // init mode
 
 NVS_Handle nvsHandle;
 NVS_Attrs regionAttrs;
@@ -353,6 +356,7 @@ static uint8_t nvsDataBuffer[JUXTA_LOG_SIZE];
 static uint32_t nvsConfigBuffer[JUXTA_CONFIG_SIZE];
 static uint32_t localTime = 0;
 static uint32_t juxtaStartupTime = JUXTA_SNIFF_STARTUP_DELAY;
+uint8_t iosTime[4];
 
 bool juxtaRadio = false;
 uint8_t juxtaRadioCount = 0;
@@ -593,8 +597,13 @@ static void logScan(void) // called after MR_EVT_ADV_REPORT -> multi_role_addSca
                     if (logCount == 0)
                     {
                         // erase all at once
-                        for (k = 0; k < regionAttrs.regionSize / regionAttrs.sectorSize; k++) {
-                            NVS_erase(nvsHandle, k * regionAttrs.sectorSize, regionAttrs.sectorSize);
+                        for (k = 0;
+                                k
+                                        < regionAttrs.regionSize
+                                                / regionAttrs.sectorSize; k++)
+                        {
+                            NVS_erase(nvsHandle, k * regionAttrs.sectorSize,
+                                      regionAttrs.sectorSize);
                         }
                     }
 
@@ -1781,6 +1790,33 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
             Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "Discovered: %s",
                     Util_convertBdAddr2Str(pAdvRpt->addr));
         }
+        if (multi_role_findSvcUuid(TIME_SERVICE_UUID, pAdvRpt->pData,
+                                   pAdvRpt->dataLen))
+        {
+            uint8_t timeLoc;
+            uint8_t foundUUID = 0;
+            for (timeLoc = 0; timeLoc < pAdvRpt->dataLen - 1; timeLoc++)
+            {
+                if (pAdvRpt->pData[timeLoc] == LO_UINT16(TIME_SERVICE_UUID)
+                        && pAdvRpt->pData[timeLoc + 1]
+                                == HI_UINT16(TIME_SERVICE_UUID))
+                {
+                    foundUUID = 1;
+                }
+
+                // good to March 24, 2024
+                if (pAdvRpt->pData[timeLoc] > 0x62
+                        && pAdvRpt->pData[timeLoc] < 0x66 && foundUUID)
+                {
+                    iosTime[0] = pAdvRpt->pData[timeLoc - 3];
+                    iosTime[1] = pAdvRpt->pData[timeLoc - 2];
+                    iosTime[2] = pAdvRpt->pData[timeLoc - 1];
+                    iosTime[3] = pAdvRpt->pData[timeLoc];
+                    multi_role_enqueueMsg(JUXTA_TIME_UPDATED, NULL);
+                    break;
+                }
+            }
+        }
 #else // !DEFAULT_DEV_DISC_BY_SVC_UUID
         Display_printf(dispHandle, MR_ROW_CUR_CONN, 0, "Discovered: %s",
                        Util_convertBdAddr2Str(pAdvRpt->addr));
@@ -2078,7 +2114,8 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
 
                 if (localTime >= juxtaStartupTime) // sniff ready
                 {
-                    if (GPIO_read(AXY_INT) == 0) // active
+                    // either axy shake interrupted or time has been synced (iOS) and time%override is within some range
+                    if (GPIO_read(AXY_INT) == 0 || (iosTime > 0 && localTime % TIME_MOD_OVERRIDE < 10))
                     {
                         resetSniff(); // resets internal interrupt
                         if (juxtaMode == JUXTA_MODE_AXY_LOGGER)
@@ -2096,6 +2133,15 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
                 resetSniff(); // resets internal interrupt
             }
         }
+        break;
+    }
+
+    case JUXTA_TIME_UPDATED:
+    {
+        memcpy(&localTime, iosTime, sizeof(localTime));
+        blink(true);
+        blink(true);
+        blink(true);
         break;
     }
 
