@@ -96,8 +96,6 @@
 #define JUXTA_SNIFF_STARTUP_DELAY       5 // seconds
 #define JUXTA_LED_TIMEOUT_PERIOD        1 // ms
 #define TIME_SERVICE_UUID               0xEFFE // see iOS > BLEPeripheralApp
-#define TIME_MOD_OVERRIDE               120 // seconds, mod with localTime, adv/scan in logger mode
-#define TIME_MOD_JITTER                 5 // seconds, used for some randomness
 
 // Juxta NVS
 #define JUXTA_LOG_SIZE              17 // bytes
@@ -2041,7 +2039,6 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
         uint32_t localTime_human = rev32(localTime);
         SimpleProfile_SetParameter(SIMPLEPROFILE_CHAR2, SIMPLEPROFILE_CHAR2_LEN,
                                    &localTime_human);
-
         if (juxtaRadio)
         {
             if (juxtaRadioCount == 0) // advertise segment
@@ -2106,14 +2103,13 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
 
                 if (localTime >= juxtaStartupTime) // sniff ready
                 {
-                    // either axy sniff interrupted or time%override is within some range
-                    uint32_t randInc = rand() % TIME_MOD_JITTER; // add some random so devices are out of sync
-                    uint32_t tmod = (localTime + randInc) % TIME_MOD_OVERRIDE; // TIME_MOD_OVERRIDE;
-                    if (GPIO_read(AXY_INT) == 0 || tmod < TIME_MOD_JITTER * 2)
+                    if (GPIO_read(AXY_INT) == 0 || 1) // !! FULL OUT TRIAL
                     {
                         resetSniff(); // resets internal interrupt
                         if (juxtaMode == JUXTA_MODE_AXY_LOGGER)
                             juxtaRadio = true;
+                        uint32_t randSleep = rand() * 60; // 32536 * 60 / 1e6 = 1.1s
+                        usleep(randSleep);
                     }
                 }
 
