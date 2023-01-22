@@ -90,7 +90,7 @@
 //#define MR_PERIODIC_EVT_PERIOD          5000
 //#define JUXTA_ADV_TIMEOUT_PERIOD        2000
 //#define JUXTA_SCAN_TIMEOUT_PERIOD       1000 // less than DEFAULT_SCAN_DURATION
-#define JUXTA_SCAN_N_TIMES              2
+#define JUXTA_SCAN_N_TIMES              5 // includes advertisement
 //#define JUXTA_MAGNET_PERIOD             1000
 #define JUXTA_PERIODIC_PERIOD           1000 // time keeper
 #define JUXTA_SNIFF_STARTUP_DELAY       5 // seconds
@@ -346,7 +346,7 @@ typedef enum
     JUXTA_MODE_AXY_LOGGER, JUXTA_MODE_SHELF, JUXTA_MODE_ADVERTISE_NOSCAN
 } juxtaMode_t;
 
-static uint8_t juxtaMode = JUXTA_MODE_SHELF; // init mode
+static uint8_t juxtaMode = JUXTA_MODE_AXY_LOGGER;//JUXTA_MODE_SHELF; // init mode
 
 NVS_Handle nvsHandle;
 NVS_Attrs regionAttrs;
@@ -2103,13 +2103,13 @@ static void multi_role_processAppMsg(mrEvt_t *pMsg)
 
                 if (localTime >= juxtaStartupTime) // sniff ready
                 {
-                    if (GPIO_read(AXY_INT) == 0 || 1) // !! FULL OUT TRIAL
+                    if (GPIO_read(AXY_INT) == 0)
                     {
                         resetSniff(); // resets internal interrupt
                         if (juxtaMode == JUXTA_MODE_AXY_LOGGER)
                             juxtaRadio = true;
-                        uint32_t randSleep = rand() * 60; // 32536 * 60 / 1e6 = 1.1s
-                        usleep(randSleep);
+//                        uint32_t randSleep = rand() * 60; // 32536 * 60 / 1e6 = 1.1s
+//                        usleep(randSleep);
                     }
                 }
 
